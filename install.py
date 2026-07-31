@@ -1039,15 +1039,42 @@ def main():
     total = 6
     binaries: dict = {}
     model_dir = ""
+    token = None
+    problems = []
+
+    def attempt(number, title, fn, fatal=False):
+        """Run one step, and carry on if it fails unless it is fatal.
+
+        Steps used to run in a single try block, so anything going wrong in
+        the middle skipped everything after it. That is how a Devuan
+        machine ended up with no lmcluster.toml at all: the firewall step
+        raised on a missing dependency, and writing the config — the one
+        genuinely essential output — never happened. A step that cannot do
+        its job should cost you that step and nothing else.
+        """
+        step(number, total, title)
+        try:
+            return fn()
+        except (NeedsRestart, KeyboardInterrupt):
+            raise
+        except Abort as e:
+            say(f"  ✗ {e}")
+            problems.append(f"{title}: {e}")
+        except Exception as e:
+            say(f"  ✗ this step failed: {type(e).__name__}: {e}")
+            problems.append(f"{title}: {e}")
+            if fatal:
+                raise Abort(str(e))
+        return None
 
     try:
-        step(1, total, "Python environment")
-        install_python_env(args)
+        attempt(1, "Python environment",
+                lambda: install_python_env(args), fatal=True)
 
-        step(2, total, "llama.cpp")
-        if args.no_rpc:
-            say("  skipped (--no-rpc)")
-        else:
+        def do_llamacpp():
+            if args.no_rpc:
+                say("  skipped (--no-rpc)")
+                return None
             wanted = args.with_rpc or args.build_from_source
             if not wanted:
                 say("  This is the part that lets one model run across")
@@ -1056,41 +1083,34 @@ def main():
                 say("  needs no compiler.")
                 wanted = ask("  Fetch it now?", default=True,
                              assume_yes=args.yes)
-            if wanted:
-                try:
-                    binaries = get_llamacpp(args)
-                except NeedsRestart as e:
-                    say("")
-                    say(f"  {e}")
-                    say("")
-                    say("  Nothing has gone wrong. Windows only picks up new")
-                    say("  tools in terminals opened after they were")
-                    say("  installed, so this one cannot see the compiler.")
-                    say("")
-                    say("  Close this window, open a new one, go to")
-                    say(f"    {ROOT}")
-                    say("  and run:")
-                    say(f"    {PY} install.py --with-rpc")
-                    say("")
-                    say("  The rest of the setup below will still finish, so")
-                    say("  you will not have to redo any of it.")
-                except Abort as e:
-                    say(f"  ✗ {e}")
-                    say(f"  Re-run later with: {PY} install.py --with-rpc")
-            else:
-                say("  skipped — re-run with --with-rpc when you want it")
+            if not wanted:
+                say("  skipped — run this again with --with-rpc when ready")
+                return None
+            try:
+                return get_llamacpp(args)
+            except NeedsRestart as e:
+                say("")
+                say(f"  {e}")
+                say("")
+                say("  Nothing has gone wrong. Windows only picks up new")
+                say("  tools in terminals opened after they were")
+                say("  installed, so this one cannot see the compiler.")
+                say("")
+                say("  Close this window, open a new one, go to")
+                say(f"    {ROOT}")
+                say("  and run:")
+                say(f"    {PY} install.py --with-rpc")
+                say("")
+                say("  The rest of the setup below will still finish.")
+                return None
 
-        step(3, total, "Where your models are")
-        model_dir = choose_model_dir(args)
-
-        step(4, total, "Network ports")
-        open_firewall(args)
-
-        step(5, total, "Cluster key")
-        token = setup_token(args)
-
-        step(6, total, "Configuration")
-        write_config(binaries, model_dir)
+        binaries = attempt(2, "llama.cpp", do_llamacpp) or {}
+        model_dir = attempt(3, "Where your models are",
+                            lambda: choose_model_dir(args)) or ""
+        attempt(4, "Network ports", lambda: open_firewall(args))
+        token = attempt(5, "Cluster key", lambda: setup_token(args))
+        attempt(6, "Configuration",
+                lambda: write_config(binaries, model_dir), fatal=True)
 
     except NeedsRestart as e:
         say(f"\n{e}")
@@ -1104,7 +1124,9 @@ def main():
         return 130
 
     say("\n" + "=" * 60)
-    if binaries:
+    if problems:
+        say("  Finished, but some steps did not work.")
+    elif binaries:
         say("  Done. This machine is ready.")
     else:
         # The old version printed "Installed." whatever had happened, so a
@@ -1112,9 +1134,28 @@ def main():
         # lines below the error that mattered.
         say("  Partly done — llama.cpp is NOT built.")
     say("=" * 60)
-    say(f"\n  Cluster token: {token}")
-    say("  Every other node needs this. Install them with:")
-    say(f"    {PY} install.py --token {token}")
+    if problems:
+        say("=" * 60)
+        for p in problems:
+            say(f"  • {p}")
+        say("")
+
+    # The config file is what everything else reads, so its absence is
+    # worth shouting about rather than leaving to be discovered later.
+    cfg_file = os.path.join(ROOT, "lmcluster.toml")
+    if not os.path.exists(cfg_file):
+        say("  ✗ No lmcluster.toml was written. The node will start with")
+        say("    built-in defaults, which means it will not lend memory or")
+        say("    load models. Fix whatever is listed above and run this")
+        say("    installer again.")
+        say("")
+    else:
+        say(f"  Config: {cfg_file}")
+
+    if token:
+        say(f"\n  Cluster key: {token}")
+        say("  Every other machine needs this. Install them with:")
+        say(f"    {PY} install.py --token {token}")
     say("\n  Start this node:")
     say("    ./run.sh" if not IS_WINDOWS else "    run.bat")
     if binaries:

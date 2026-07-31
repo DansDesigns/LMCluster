@@ -286,6 +286,38 @@ class ShardMaster:
         self.plan: dict | None = None
         self.log: list[str] = []
         self.started_at: float | None = None
+        self._help: str | None = None
+
+    def help_text(self) -> str:
+        """What this llama-server build says about its own options.
+
+        Asked rather than assumed, because the options change under us.
+        Flash attention is the case that caught this out: it used to be a
+        bare switch, `-fa`, and is now `-fa on|off|auto`. Give a current
+        build the old form and it stops immediately with "expected value
+        for argument"; give an older build the new form and it fails just
+        as hard. Reading the help costs a fraction of a second and settles
+        it either way.
+        """
+        if self._help is not None:
+            return self._help
+        try:
+            r = subprocess.run([self.binary, "--help"], capture_output=True,
+                               text=True, timeout=20, check=False)
+            self._help = (r.stdout or "") + (r.stderr or "")
+        except (OSError, subprocess.SubprocessError):
+            self._help = ""
+        return self._help
+
+    def _flash_attn_args(self, wanted: bool) -> list:
+        help_text = self.help_text()
+        takes_value = bool(re.search(r"--flash-attn\s*\[?\s*on\s*\|",
+                                     help_text))
+        if takes_value:
+            return ["-fa", "on" if wanted else "off"]
+        # Older builds treat it as a plain switch, and there is no way to
+        # ask for it off beyond leaving it out.
+        return ["-fa"] if wanted else []
 
     @property
     def running(self) -> bool:
@@ -306,8 +338,7 @@ class ShardMaster:
         # -ngl counts layers offloaded to *devices*, and RPC endpoints are
         # devices, so this is what actually distributes the model.
         cmd += ["-ngl", str(plan.get("ngl", 999))]
-        if plan.get("flash_attn", True):
-            cmd += ["-fa"]
+        cmd += self._flash_attn_args(plan.get("flash_attn", True))
         # How much of the model each machine holds. Left alone, llama.cpp
         # divides the layers in proportion to each device's free memory,
         # which is a sensible default. Setting it by hand is worth doing
@@ -344,6 +375,24 @@ class ShardMaster:
         self.plan = plan
         self.started_at = time.time()
         _drain(self.proc, self.log)
+
+        # llama.cpp rejects a bad option instantly. Reporting success and
+        # letting the failure turn up later as "the model is not loaded"
+        # sends somebody looking in the wrong place — the actual complaint,
+        # which names the option and what was wrong with it, is sitting
+        # right here in the output.
+        time.sleep(1.2)
+        if self.proc.poll() is not None:
+            output = "\n".join(self.log[1:])[:600].strip()
+            self.proc = None
+            self.plan = None
+            self.started_at = None
+            raise RpcError(
+                "llama.cpp started and stopped again straight away."
+                + (f"\n\n{output}" if output else "")
+                + "\n\nThe command that was run is at the top of the load "
+                  "log.")
+
         return self.status()
 
     def stop(self) -> dict:

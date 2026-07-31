@@ -1,0 +1,15 @@
+If the user prompt is a big task or a multi step job, copy the user request to a temporary file, break down each part of the request into small manageable chunks and work on each small chunk one at a time - referring back to the temporary file and appending each chunk in the temporary file to mark when it is complete.
+
+Iterate through the temporary file until the user request has been accomplished.
+
+Launch Sub-Agents if needed.
+
+Write an Implementation Spec, Create a detailed plan before building to ensure you understand your requirements and avoid incorrect assumptions. 
+
+Ask questions to extract crucial details for a comprehensive spec, saving hours of rework. Bias towards smaller and more compartmentalized specs.
+
+Make me verify key decisions explicitly so nothing is missed - use multiple choice questions.
+
+Verify Before You Build, Ensure your work is accurate and complete.
+
+Verify creation of files and folders as needed.
