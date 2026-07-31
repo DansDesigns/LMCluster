@@ -697,6 +697,16 @@ async function refreshPool(){
   const running = d.model.loaded;
   document.getElementById('stop').style.display = running ? '' : 'none';
   document.getElementById('go').style.display = running ? 'none' : '';
+
+  /* A model can fail well after loading appeared to start — a large one
+     takes minutes to read off disk and can run out of room near the end.
+     Without this it would simply stop being loaded, with nothing to say
+     why. */
+  if(!running && d.model.failure){
+    document.getElementById('verdict').innerHTML =
+      `<div class="verdict no">The model stopped while loading.</div>
+       <pre class="log">${esc(d.model.failure)}</pre>`;
+  }
 }
 
 async function listModels(){
@@ -723,7 +733,15 @@ async function planOrLoad(load){
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({model_path:path, ctx})});
     d = await r.json();
-    if(!r.ok){ v.innerHTML = `<div class="verdict no">${esc(d.detail || r.statusText)}</div>`; return; }
+    if(!r.ok){
+      const detail = String(d.detail || r.statusText);
+      const [first, ...rest] = detail.split('\n');
+      v.innerHTML = `<div class="verdict no">${esc(first)}</div>` +
+        (rest.join('\n').trim()
+          ? `<pre class="log">${esc(rest.join('\n').trim())}</pre>` : '');
+      showLog();
+      return;
+    }
   }catch(e){ v.innerHTML = `<div class="verdict no">${esc(e)}</div>`; return; }
 
   const plan = d.plan || (d.status && d.status.plan);
@@ -786,17 +804,41 @@ async function send(){
   const reply = {role:'assistant', content:'', stats:''};
   history.push(reply);
   renderMsgs();
+
   const status = document.getElementById('chat-status');
-  status.innerHTML = '<span class="spin"></span> waiting for the first token';
+  /* A model spread over a home network can take a minute before the first
+     token appears. A spinner alone is indistinguishable from a page that
+     has silently failed, so this counts the seconds. */
+  const began = Date.now();
+  let ticking = true;
+  const tick = setInterval(() => {
+    if(!ticking) return;
+    const secs = Math.round((Date.now() - began) / 1000);
+    status.innerHTML = `<span class="spin"></span> waiting for the model` +
+      (secs > 2 ? ` — ${secs}s` : '');
+  }, 500);
+  status.innerHTML = '<span class="spin"></span> waiting for the model';
 
   try{
     const r = await fetch('/api/chat', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({prompt:text, chat_id:chatId,
         history:history.slice(0,-2)})});
+
+    /* Checked, rather than assumed. A failed request still has a readable
+       body, so streaming it produced neither tokens nor an error and the
+       page simply sat there saying nothing. */
+    if(!r.ok){
+      let detail = r.statusText;
+      try{ detail = (await r.json()).detail || detail; }catch(e){}
+      reply.content = `The request failed (${r.status}).\n\n${detail}`;
+      renderMsgs();
+      throw new Error('request rejected');
+    }
+
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let buf = '';
+    let buf = '', sawAnything = false;
     while(true){
       const {value, done} = await reader.read();
       if(done) break;
@@ -806,9 +848,18 @@ async function send(){
       for(const line of lines){
         if(!line.trim()) continue;
         let c; try{ c = JSON.parse(line); }catch(e){ continue; }
+        sawAnything = true;
         if(c.chat_id) chatId = c.chat_id;
-        if(c.delta){ reply.content += c.delta; status.textContent = 'answering'; renderMsgs(); }
-        if(c.error){ reply.content = c.error; reply.stats = ''; renderMsgs(); }
+        if(c.delta){
+          ticking = false;
+          reply.content += c.delta;
+          status.textContent = 'answering';
+          renderMsgs();
+        }
+        if(c.error){
+          ticking = false;
+          reply.content = c.error; reply.stats = ''; renderMsgs();
+        }
         if(c.done && !c.error){
           const bits = [];
           if(c.first_token) bits.push(`first token after ${c.first_token}s`);
@@ -819,7 +870,19 @@ async function send(){
         }
       }
     }
-  }catch(e){ reply.content = 'Request failed: ' + e; renderMsgs(); }
+    if(!sawAnything && !reply.content){
+      reply.content = 'The model returned nothing at all. Check the load '
+        + 'log on the Pool page — it may have stopped.';
+      renderMsgs();
+    }
+  }catch(e){
+    if(!reply.content){
+      reply.content = 'Could not reach this machine: ' + e;
+      renderMsgs();
+    }
+  }
+  ticking = false;
+  clearInterval(tick);
   status.textContent = '';
   sending = false;
   listChats();

@@ -317,9 +317,11 @@ def create_app(config: Config) -> FastAPI:
     app = FastAPI(title="LMCluster")
     app.state.node = node
 
-    # Proves the caller is part of this cluster; used for calls one machine
-    # makes to another.
-    peer_guard = [Depends(auth.make_dependency(config))]
+    # Proves the caller is part of this cluster. Nothing uses it on its own
+    # at present — admin_guard accepts the same token and additionally lets
+    # the machine's own dashboard through — but it is what a
+    # machine-to-machine endpoint would want if one is added.
+    peer_guard = [Depends(auth.make_dependency(config))]  # noqa: F841
     # Accepts either the cluster key or a request from this machine, which
     # is what the dashboard is. Used for anything that changes this node.
     admin_guard = [Depends(auth.make_local_or_token_dependency(config))]
@@ -720,9 +722,16 @@ def create_app(config: Config) -> FastAPI:
     async def model_info():
         return await node.engine.info()
 
-    @app.post("/api/chat", dependencies=peer_guard)
+    @app.post("/api/chat", dependencies=admin_guard)
     async def chat(req: ChatRequest):
         """Streamed reply, as newline-delimited JSON.
+
+        Guarded by loopback-or-token like everything else the dashboard
+        touches. It was previously token-only, which meant the page served
+        by this very node could not use it: the browser has no token and no
+        way to be given one. Every test passed because every test sent a
+        token explicitly, and the fault showed up as asking a question and
+        getting silence.
 
         Streaming is not a nicety here. A large model spread over a home
         network may produce a token every second or two, so a non-streaming

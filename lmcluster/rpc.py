@@ -286,6 +286,7 @@ class ShardMaster:
         self.plan: dict | None = None
         self.log: list[str] = []
         self.started_at: float | None = None
+        self.last_failure: str | None = None
         self._help: str | None = None
 
     def help_text(self) -> str:
@@ -364,6 +365,7 @@ class ShardMaster:
             raise RpcError(f"model not found: {plan['model_path']}")
 
         cmd = self.build_command(plan, extra_args)
+        self.last_failure = None
         self.log = [f"$ {' '.join(shlex.quote(c) for c in cmd)}"]
         try:
             self.proc = subprocess.Popen(
@@ -376,24 +378,66 @@ class ShardMaster:
         self.started_at = time.time()
         _drain(self.proc, self.log)
 
-        # llama.cpp rejects a bad option instantly. Reporting success and
-        # letting the failure turn up later as "the model is not loaded"
-        # sends somebody looking in the wrong place — the actual complaint,
-        # which names the option and what was wrong with it, is sitting
-        # right here in the output.
-        time.sleep(1.2)
+        # A model that is too large, or a file llama.cpp cannot read, fails
+        # during loading rather than at startup, so this waits long enough
+        # to catch that rather than only catching a rejected option.
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.25)
+
         if self.proc.poll() is not None:
-            output = "\n".join(self.log[1:])[:600].strip()
+            code = self.proc.returncode
+            # Give the reader thread a moment to collect whatever was
+            # printed on the way out; the useful part is often the very
+            # last line, written just before the process died.
+            time.sleep(0.4)
+            detail = self._failure_detail()
             self.proc = None
             self.plan = None
             self.started_at = None
             raise RpcError(
-                "llama.cpp started and stopped again straight away."
-                + (f"\n\n{output}" if output else "")
-                + "\n\nThe command that was run is at the top of the load "
-                  "log.")
+                f"llama.cpp stopped while loading the model "
+                f"(exit code {code}).\n\n{detail}\n\n"
+                f"The full output, including the command that was run, is "
+                f"under Load log.")
 
         return self.status()
+
+    # Lines llama.cpp prints on the way up that say nothing about a
+    # failure. Showing these instead of the error, which is what happened
+    # before, tells you only that the program started — which you knew.
+    _NOISE = ("common_param", "CORS is set to allow", "this can be a security",
+              "more info: https", "-----", "build info", "system info",
+              "llama_server: ---")
+
+    _INTERESTING = ("error", "failed", "cannot", "unable", "not enough",
+                    "out of memory", "oom", "no such file", "invalid",
+                    "unsupported", "terminate", "assert", "abort",
+                    "insufficient", "exception")
+
+    def _failure_detail(self, lines: int = 14) -> str:
+        """The part of the output worth reading.
+
+        Errors appear at the end. The previous version showed the first six
+        hundred characters, which is the startup banner — the CORS notice
+        and the verbosity setting — and cut off before anything that
+        explained the failure.
+        """
+        body = [ln for ln in self.log[1:] if ln.strip()]
+        if not body:
+            return "It printed nothing on the way out."
+
+        flagged = [ln for ln in body
+                   if any(word in ln.lower() for word in self._INTERESTING)]
+        if flagged:
+            return "\n".join(flagged[-lines:])
+
+        useful = [ln for ln in body
+                  if not any(n in ln for n in self._NOISE)]
+        tail = (useful or body)[-lines:]
+        return "\n".join(tail)
 
     def stop(self) -> dict:
         if self.proc is not None and self.proc.poll() is None:
@@ -414,7 +458,30 @@ class ShardMaster:
         """
         return self.log[-limit:]
 
+    def check_still_running(self):
+        """Notice a model that died after we reported it loaded.
+
+        A large model can take minutes to read off disk, so the check at
+        start time cannot wait for the whole of it — six seconds catches a
+        rejected option or a file it will not open, and then we let it get
+        on with it. But it can still fail at forty seconds, having read
+        twenty gigabytes and found there is nowhere to put the rest, and
+        without this that failure would show up as nothing more than the
+        model quietly not being loaded.
+        """
+        if self.proc is None or self.proc.poll() is None:
+            return
+        code = self.proc.returncode
+        self.last_failure = (
+            f"llama.cpp stopped after {round(time.time() - self.started_at)}s "
+            f"(exit code {code}).\n\n{self._failure_detail()}"
+            if self.started_at else self._failure_detail())
+        self.proc = None
+        self.plan = None
+        self.started_at = None
+
     def status(self) -> dict:
+        self.check_still_running()
         return {
             "running": self.running,
             "port": self.port,
@@ -422,6 +489,7 @@ class ShardMaster:
             "uptime": (round(time.time() - self.started_at)
                        if self.started_at and self.running else None),
             "plan": self.plan,
+            "last_failure": self.last_failure,
             "url": f"http://127.0.0.1:{self.port}" if self.running else None,
         }
 

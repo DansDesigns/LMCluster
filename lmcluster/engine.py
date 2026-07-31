@@ -55,7 +55,11 @@ class Engine:
         """What is loaded, and across how many machines."""
         url = self.url()
         if url is None:
-            return {"loaded": False, "model": None, "nodes": 0, "workers": []}
+            return {"loaded": False, "model": None, "nodes": 0,
+                    "workers": [],
+                    # If it died rather than never having been started, say
+                    # so. "No model loaded" on its own is true and useless.
+                    "failure": self.master.status().get("last_failure")}
         plan = self.master.plan or {}
         model = None
         try:
