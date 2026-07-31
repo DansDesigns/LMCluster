@@ -13,6 +13,7 @@ thin client over llama-server's OpenAI-compatible endpoints.
 """
 
 import json
+import os
 import re
 import time
 
@@ -21,6 +22,18 @@ import httpx
 
 class NoModelLoaded(RuntimeError):
     """Raised when something asks for inference and nothing is loaded."""
+
+
+class ModelLoading(RuntimeError):
+    """Raised when a model is on its way in but not yet usable.
+
+    Worth its own exception rather than being folded in with a lost
+    connection. llama.cpp opens its port the moment it starts and answers
+    every request with 503 until the weights are actually in memory, which
+    on a large model spread over a network is minutes. Reporting that as
+    lost contact sends somebody hunting for a machine that has dropped off
+    when in fact everything is fine and they simply asked too early.
+    """
 
 
 class Engine:
@@ -51,15 +64,74 @@ class Engine:
                 "no model is loaded. Load one from the Pool page first.")
         return url
 
+    async def state(self) -> str:
+        """One of: none, loading, ready, unreachable.
+
+        llama.cpp answers /health with 200 once the model is usable and 503
+        while it is still reading it in. That distinction matters more here
+        than it would elsewhere, because a large model spread across
+        several machines takes minutes to load while its port is open the
+        whole time, and asking too early gets a 503 that looks alarming and
+        is not.
+
+        A build without a health endpoint is treated as ready rather than
+        broken. It answered, which is the important part, and refusing to
+        talk to a working server because it lacks one endpoint would be a
+        worse failure than the one being guarded against.
+        """
+        url = self.url()
+        if url is None:
+            return "none"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{url}/health")
+        except httpx.HTTPError:
+            return "unreachable"
+
+        if r.status_code == 200:
+            return "ready"
+        if r.status_code == 503:
+            return "loading"
+        if r.status_code == 404:
+            return "ready"          # older build, no health endpoint
+
+        # Anything else: ask whether it can list models, which every build
+        # can do, before concluding it is not answering at all.
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r2 = await client.get(f"{url}/v1/models")
+            return "ready" if r2.status_code == 200 else "unreachable"
+        except httpx.HTTPError:
+            return "unreachable"
+
+    async def require_ready(self) -> str:
+        url = self._require_url()
+        state = await self.state()
+        if state == "loading":
+            waited = self.master.status().get("uptime")
+            raise ModelLoading(
+                "The model is still loading"
+                + (f" — {waited}s so far" if waited else "")
+                + ". A large model spread over several machines takes a "
+                  "while to read in. Ask again in a minute; the Pool page "
+                  "shows when it is ready.")
+        if state == "unreachable":
+            raise RuntimeError(
+                "llama.cpp is running but not answering. Check the load log "
+                "on the Pool page.")
+        return url
+
     async def info(self) -> dict:
         """What is loaded, and across how many machines."""
         url = self.url()
         if url is None:
-            return {"loaded": False, "model": None, "nodes": 0,
-                    "workers": [],
+            return {"loaded": False, "state": "none", "model": None,
+                    "nodes": 0, "workers": [],
                     # If it died rather than never having been started, say
                     # so. "No model loaded" on its own is true and useless.
                     "failure": self.master.status().get("last_failure")}
+
+        state = await self.state()
         plan = self.master.plan or {}
         model = None
         try:
@@ -74,8 +146,11 @@ class Engine:
             # know about rather than claiming nothing is loaded.
             pass
         return {
-            "loaded": True,
-            "model": model or plan.get("model_path", "").split("/")[-1],
+            "loaded": state == "ready",
+            "state": state,
+            "loading_for": self.master.status().get("uptime"),
+            "model": model or os.path.basename(
+                plan.get("model_path", "").replace("\\", "/")),
             "nodes": len(plan.get("workers", [])) + 1,
             "workers": [w["name"] for w in plan.get("workers", [])],
             "model_size": plan.get("model_size"),
@@ -118,7 +193,7 @@ class Engine:
                        history: list | None = None,
                        temperature: float | None = None,
                        max_tokens: int | None = None) -> dict:
-        url = self._require_url()
+        url = await self.require_ready()
         body = {"messages": self._messages(prompt, system, history),
                 **self._sampling(temperature, max_tokens)}
         started = time.time()
@@ -148,7 +223,7 @@ class Engine:
         without streaming the interface would simply appear frozen for
         minutes at a time.
         """
-        url = self._require_url()
+        url = await self.require_ready()
         body = {"messages": self._messages(prompt, system, history),
                 "stream": True,
                 **self._sampling(temperature, max_tokens)}

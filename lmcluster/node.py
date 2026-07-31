@@ -855,7 +855,8 @@ def create_app(config: Config) -> FastAPI:
                     if chunk.get("delta"):
                         collected.append(chunk["delta"])
                     yield json.dumps(chunk) + "\n"
-            except engine_mod.NoModelLoaded as e:
+            except (engine_mod.NoModelLoaded,
+                    engine_mod.ModelLoading) as e:
                 yield json.dumps({"done": True, "error": str(e)}) + "\n"
                 return
             except httpx.HTTPError as e:
@@ -978,7 +979,8 @@ def create_app(config: Config) -> FastAPI:
 
             try:
                 result = await task
-            except engine_mod.NoModelLoaded as e:
+            except (engine_mod.NoModelLoaded,
+                    engine_mod.ModelLoading) as e:
                 yield json.dumps({"done": True, "error": str(e)}) + "\n"
                 return
             except httpx.HTTPError as e:

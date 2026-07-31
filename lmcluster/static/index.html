@@ -80,8 +80,11 @@ code{font-family:var(--mono);font-size:.78rem;color:var(--amber);word-break:brea
   overflow:hidden;background:var(--ink);margin:.7rem 0 .35rem}
 .seg{display:flex;align-items:center;justify-content:center;font-family:var(--mono);
   font-size:.62rem;font-weight:600;transition:width .4s ease;min-width:0}
+.seg.model{background:var(--amber);color:var(--ink)}
 .seg.live{background:var(--teal);color:var(--ink)}
 .seg.spare{background:var(--amber-dim);color:var(--text)}
+.seg.loading{background:repeating-linear-gradient(45deg,var(--amber),
+  var(--amber) 8px,var(--amber-dim) 8px,var(--amber-dim) 16px);color:var(--ink)}
 .legend{display:flex;gap:1.1rem;font-family:var(--mono);font-size:.65rem;
   color:var(--muted)}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
@@ -213,8 +216,8 @@ pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
         <h2>Memory pool</h2>
         <div class="pooltotal" id="pool-total"><span class="spin"></span></div>
         <div class="poolbar" id="pool-bar"></div>
-        <div class="legend">
-          <span><i style="background:var(--teal)"></i>in the pool</span>
+        <div class="legend" id="pool-legend">
+          <span><i style="background:var(--teal)"></i>free</span>
           <span><i style="background:var(--amber-dim)"></i>available</span>
         </div>
         <div id="pool-breakdown"></div>
@@ -551,9 +554,14 @@ async function modelBar(){
   }catch(e){}
   try{
     const m = await (await fetch('/api/model')).json();
-    document.getElementById('modelbar').textContent = m.loaded
-      ? `holding ${m.model} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
-      : 'no model loaded';
+    document.getElementById('modelbar').textContent =
+      m.state === 'loading'
+        ? `loading ${m.model || 'a model'}${m.loading_for ? ` — ${m.loading_for}s` : ''}`
+      : m.loaded
+        ? `holding ${m.model} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
+      : m.state === 'unreachable'
+        ? 'llama.cpp is not answering'
+        : 'no model loaded';
   }catch(e){}
 }
 
@@ -588,6 +596,8 @@ function advice(warnings, who){
     <div class="advice ${w.severity}"><p>${esc(who)} — ${esc(w.message)}
     ${w.fix ? '<strong>' + esc(w.fix) + '</strong>' : ''}</p></div>`).join('');
 }
+
+function loadingNow(d){ return d.model && d.model.state === 'loading'; }
 
 function machineCard(m, contrib){
   /* One card per machine, this machine included and first. Keeping them in
@@ -641,17 +651,50 @@ async function refreshPool(){
     '<p class="empty">cannot reach this machine</p>'; return; }
   const s = d.summary, L = d.local;
 
-  document.getElementById('pool-total').innerHTML =
-    `${gb(s.live_bytes)}<small>usable from this machine, across ` +
-    `${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
-    (s.potential_bytes > s.live_bytes
-      ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
+  const mb = (d.model.model_size && d.model.state !== 'none')
+    ? Math.min(d.model.model_size, s.live_bytes) : 0;
+  document.getElementById('pool-total').innerHTML = mb
+    ? `${gb(s.live_bytes - mb)} free<small>of ${gb(s.live_bytes)} across ` +
+      `${s.node_count} machine${s.node_count === 1 ? '' : 's'} · ` +
+      `${gb(mb)} held by ${esc(d.model.model || 'the model')}</small>`
+    : `${gb(s.live_bytes)}<small>usable from this machine, across ` +
+      `${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
+      (s.potential_bytes > s.live_bytes
+        ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
 
+  document.getElementById('pool-legend').innerHTML =
+    (mb ? `<span><i style="background:var(--amber)"></i>${
+       loadingNow(d) ? 'loading' : 'model'}</span>` : '') +
+    `<span><i style="background:var(--teal)"></i>free</span>` +
+    (s.potential_bytes > s.live_bytes
+      ? `<span><i style="background:var(--amber-dim)"></i>available</span>` : '');
+
+  /* Three parts to the bar: what the loaded model is taking up, what is
+     left of the pool, and what more there would be if the remaining
+     machines joined. Seeing the model against the pool is the quickest way
+     to judge whether a bigger one would fit. */
   const max = Math.max(s.potential_bytes, 1);
-  const a = s.live_bytes / max * 100, b = (s.potential_bytes - s.live_bytes) / max * 100;
+  const modelBytes = (d.model.model_size && d.model.state !== 'none')
+    ? Math.min(d.model.model_size, s.live_bytes) : 0;
+  const freeBytes = Math.max(0, s.live_bytes - modelBytes);
+  const spareBytes = Math.max(0, s.potential_bytes - s.live_bytes);
+  const pct = v => v / max * 100;
+  const loading = d.model.state === 'loading';
+
   document.getElementById('pool-bar').innerHTML =
-    (a > 0 ? `<div class="seg live" style="width:${a}%">${a > 20 ? gb(s.live_bytes) : ''}</div>` : '') +
-    (b > 0 ? `<div class="seg spare" style="width:${b}%">${b > 20 ? '+' + gb(s.potential_bytes - s.live_bytes) : ''}</div>` : '');
+    (modelBytes > 0
+      ? `<div class="seg ${loading ? 'loading' : 'model'}"
+             style="width:${pct(modelBytes)}%"
+             title="${esc(d.model.model || 'model')} — ${gb(modelBytes)}">${
+           pct(modelBytes) > 18 ? gb(modelBytes) : ''}</div>` : '') +
+    (freeBytes > 0
+      ? `<div class="seg live" style="width:${pct(freeBytes)}%"
+             title="free in the pool">${
+           pct(freeBytes) > 18 ? gb(freeBytes) : ''}</div>` : '') +
+    (spareBytes > 0
+      ? `<div class="seg spare" style="width:${pct(spareBytes)}%"
+             title="available if the other machines joined">${
+           pct(spareBytes) > 18 ? '+' + gb(spareBytes) : ''}</div>` : '');
 
   /* The arithmetic, written out. Two machines will often disagree about
      the total, and showing which machines went into it turns that from a
@@ -711,7 +754,17 @@ async function refreshPool(){
   });
 
   modelBar();
-  const running = d.model.loaded;
+  /* A model that is still reading itself in is neither absent nor usable,
+     and saying so saves somebody asking a question and getting a 503 they
+     have to interpret. */
+  if(d.model.state === 'loading'){
+    document.getElementById('verdict').innerHTML =
+      `<div class="verdict solo"><span class="spin"></span>
+         Still loading${d.model.loading_for ? ` — ${d.model.loading_for}s so far` : ''}.
+         A large model spread over several machines takes a while to read
+         in. It will answer once this finishes.</div>`;
+  }
+  const running = d.model.loaded || d.model.state === 'loading';
   document.getElementById('stop').style.display = running ? '' : 'none';
   document.getElementById('go').style.display = running ? 'none' : '';
 
