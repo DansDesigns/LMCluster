@@ -38,11 +38,13 @@ why.
 
 Run the installer on the first machine:
 
-    ./install.sh          # Linux or macOS
-    install.bat           # Windows
+    ./install.sh --with-rpc          # Linux or macOS
+    install.bat --with-rpc           # Windows
 
-It sets up a Python environment, offers to build llama.cpp, and prints a
-cluster key. That key is a shared secret deciding which machines belong to
+It sets up a Python environment, offers to build llama.cpp, and creates a
+cluster key. 
+You can also choose to enter your own key.
+This key is a shared secret deciding which machines belong to
 your cluster, and every other machine needs the same one:
 
     ./install.sh --token <the key from the first machine>
@@ -80,24 +82,30 @@ To see what your machine has without changing anything:
 
     python install.py --check-tools
 
-A few flags worth knowing:
+Depending on your system, you may need to run:
 
-    ./install.sh --with-rpc                 fetch llama.cpp without asking
-    ./install.sh --gpu vulkan               force a particular backend
-    ./install.sh --build-from-source        compile rather than download
-    ./install.sh --yes                      accept every default, no prompts
-    ./install.sh --new-token                issue a fresh cluster key
+```
+python3 <- notice the 3 
+```
+
+A few additional flags worth knowing (add after --with-rpc):
+
+     --gpu vulkan               force a particular backend
+     --build-from-source        compile rather than download
+     --yes                      accept every default, no prompts
+     --new-token                generate a new  cluster key
 
 Then start the node:
 
-    ./run.sh
+    ./run.sh               # Linux
+    run.bat                # Windows
 
 The dashboard is at http://localhost:8470. Every machine runs the same thing
 and serves the same dashboard, so you can drive the cluster from whichever
 one you happen to be sitting at.
 
 Last, put your `.gguf` files somewhere and tell the dashboard where that is,
-under Settings.
+under Settings (or where you specified during install).
 
 ## How it hangs together
 
