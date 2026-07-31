@@ -99,17 +99,23 @@ _INTEGRATED_HINTS = (
 def looks_integrated(name: str | None) -> bool:
     """Is this graphics chip sharing the machine's system memory?
 
-    A heuristic on the device name, which is unreliable in principle and
-    good enough in practice for the chips people actually have. The reason
-    it matters is that integrated graphics have no memory of their own —
-    they carve it out of system RAM — so adding one to the pool cannot
-    increase how large a model the cluster can hold. Treating it like a
-    discrete card would double-count the same gigabytes twice and produce a
-    pool figure that is simply wrong.
+    A heuristic on the device name: unreliable in principle, good enough in
+    practice for the chips people actually own. It matters because
+    integrated graphics have no memory of their own — they carve it out of
+    system RAM — so adding one to the pool cannot increase how large a
+    model the cluster can hold, and a model told to use it will run out of
+    room and stop.
+
+    Trademark markers are stripped before matching, because Windows reports
+    "AMD Radeon(TM) Graphics" where Linux reports "AMD Radeon Graphics",
+    and missing that distinction sends somebody off to install a GPU build
+    that will not help them.
     """
     if not name:
         return False
-    lowered = name.lower()
+    lowered = re.sub(r"\((?:tm|r|c)\)", "", name.lower())
+    lowered = re.sub(r"[\u2122\u00ae]", "", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
     return any(hint in lowered for hint in _INTEGRATED_HINTS)
 
 
@@ -158,25 +164,51 @@ def detect_gpu() -> dict:
 
     if shutil.which("vulkaninfo") or shutil.which("vulkaninfoSDK"):
         out["backend"] = "vulkan"
-        out["name"] = _vulkan_device_name() or "Vulkan device"
-        out["integrated"] = looks_integrated(out["name"])
+        name = _vulkan_device_name()
+        out["name"] = name or "Vulkan device"
+        # An unnamed device is assumed integrated, which is the safer
+        # guess: recommending a GPU build for a chip with no memory of its
+        # own leads straight to a model that will not load, whereas staying
+        # quiet costs nothing but a little unused speed.
+        out["integrated"] = looks_integrated(name) if name else True
         return out
 
     return out
 
 
 def _vulkan_device_name() -> str | None:
-    """The name of the first Vulkan device, if it can be had cheaply.
+    """The name of the graphics device, if it can be had cheaply.
 
     Worth knowing rather than reporting a bare "Vulkan device", because
     whether it is a discrete card or the graphics built into the processor
-    changes the advice entirely.
+    changes the advice completely — and getting that wrong means telling
+    somebody to install a GPU build for a chip that has no memory of its
+    own, which is how a model ends up refusing to load.
+
+    Windows is asked first through its own inventory, which is always
+    present, rather than through vulkaninfo, which usually is not.
     """
+    if platform.system() == "Windows":
+        out = _run(["powershell", "-NoProfile", "-Command",
+                    "(Get-CimInstance Win32_VideoController | "
+                    "Select-Object -First 1).Name"], timeout=25)
+        if out and out.strip():
+            return out.strip().splitlines()[0].strip()
+
     out = _run(["vulkaninfo", "--summary"], timeout=10)
-    if not out:
-        return None
-    match = re.search(r"deviceName\s*=\s*(.+)", out)
-    return match.group(1).strip() if match else None
+    if out:
+        match = re.search(r"deviceName\s*=\s*(.+)", out)
+        if match:
+            return match.group(1).strip()
+
+    if platform.system() == "Linux":
+        # lspci is more often installed than vulkaninfo.
+        out = _run(["lspci"], timeout=10)
+        if out:
+            for line in out.splitlines():
+                if "VGA compatible controller" in line or "3D controller" in line:
+                    return line.split(":", 2)[-1].strip()
+    return None
 
 
 # -- network link ---------------------------------------------------------

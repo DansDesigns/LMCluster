@@ -47,6 +47,7 @@ class LoadModel(BaseModel):
     ctx: int | None = None          # None means use the saved default
     extra_args: str | None = None
     tensor_split: str | None = None
+    n_gpu_layers: int | None = None
     workers: list[str] | None = None
 
 
@@ -76,6 +77,7 @@ class SettingsUpdate(BaseModel):
     ctx: int | None = None
     tensor_split: str | None = None
     extra_args: str | None = None
+    n_gpu_layers: str | None = None
 
 
 class KeyRotate(BaseModel):
@@ -208,12 +210,15 @@ def gpu_mismatch(info: dict) -> dict | None:
         return None
     if info.get("accelerators"):
         return None
+    name = info.get("gpu_name") or gpu
     return {
         "severity": "warn",
-        "message": f"has a {gpu} device that llama.cpp cannot see, so only "
-                   f"its system memory is in the pool",
-        "fix": f"its llama.cpp was built for the CPU only — re-run the "
-               f"installer there with --gpu {gpu}",
+        "message": f"has a graphics device ({name}) that llama.cpp cannot "
+                   f"see, so only its system memory is in the pool",
+        "fix": f"re-run the installer there with --gpu {gpu} if you want it "
+               f"used. Worth knowing first: a graphics card holds far less "
+               f"than system memory, so for a large model a CPU build can "
+               f"be the better choice on that machine.",
     }
 
 
@@ -443,6 +448,7 @@ def create_app(config: Config) -> FastAPI:
                     "ctx": config.shard.get("ctx", 4096),
                     "tensor_split": config.shard.get("tensor_split", ""),
                     "extra_args": config.shard.get("extra_args", ""),
+                    "n_gpu_layers": config.shard.get("n_gpu_layers", ""),
                 },
                 "model_loaded": node.master.running}
 
@@ -472,6 +478,13 @@ def create_app(config: Config) -> FastAPI:
             config.shard["ctx"] = max(512, int(upd.ctx))
         if upd.extra_args is not None:
             config.shard["extra_args"] = upd.extra_args.strip()
+        if upd.n_gpu_layers is not None:
+            value = str(upd.n_gpu_layers).strip()
+            if value and not value.isdigit():
+                raise HTTPException(
+                    400, "layers on devices must be a whole number, or "
+                         "blank to let llama.cpp decide")
+            config.shard["n_gpu_layers"] = value
         if upd.tensor_split is not None:
             split = upd.tensor_split.strip()
             if split:
@@ -490,6 +503,86 @@ def create_app(config: Config) -> FastAPI:
         except OSError as e:
             raise HTTPException(500, f"could not write {config.path}: {e}")
         return await get_settings()
+
+    @app.get("/api/llamacpp")
+    async def llamacpp_info():
+        """Which llama.cpp build this machine has."""
+        return {
+            "available": node.can_shard(),
+            "problem": node.shard_problem(),
+            "version": await asyncio.to_thread(node.master.version),
+            "server": config.shard.get("llama_server", ""),
+            "rpc_server": config.shard.get("rpc_server", ""),
+        }
+
+    @app.post("/api/llamacpp/update", dependencies=admin_guard)
+    async def llamacpp_update():
+        """Fetch the current llama.cpp release, replacing what is here.
+
+        Offered because a fair share of load failures are the model file
+        being newer than the build, and the answer is a newer build. Doing
+        it from here saves re-running the whole installer for one step.
+
+        The running processes have to stop first: on Windows a file cannot
+        be replaced while something has it open, and llama.cpp's libraries
+        are open for as long as this machine is lending memory.
+        """
+        if not config.shard.get("llama_server"):
+            raise HTTPException(
+                400, "llama.cpp is not installed here. Run the installer "
+                     "with --with-rpc.")
+
+        was_lending = node.rpc_worker.running
+        if node.master.running:
+            raise HTTPException(
+                400, "a model is loaded. Unload it first — llama.cpp cannot "
+                     "be replaced while it is running.")
+        node.rpc_worker.stop()
+
+        from . import prebuilt
+        backend = node.capabilities().get("gpu") or "cpu"
+        if backend == "none":
+            backend = "cpu"
+        dest = os.path.dirname(os.path.dirname(
+            config.shard["llama_server"])) if config.shard.get(
+            "llama_server") else ""
+        dest = os.path.join(PROJECT_ROOT, "vendor", "llama.cpp-bin")
+
+        lines: list[str] = []
+        try:
+            found = await asyncio.to_thread(
+                prebuilt.fetch, dest, backend, lines.append)
+        except prebuilt.DownloadError as e:
+            if was_lending:
+                try:
+                    node.rpc_worker.start()
+                except rpc.RpcError:
+                    pass
+            raise HTTPException(400, f"{e}")
+
+        config.shard["rpc_server"] = found["rpc"]
+        config.shard["llama_server"] = found["server"]
+        config.shard["enabled"] = True
+        try:
+            config.save()
+        except OSError as e:
+            raise HTTPException(500, f"updated, but could not write "
+                                     f"{config.path}: {e}")
+
+        node.rpc_worker.binary = found["rpc"]
+        node.rpc_worker._flags = None
+        node.master.binary = found["server"]
+        node.master._help = None
+        if was_lending:
+            try:
+                node.rpc_worker.start()
+            except rpc.RpcError as e:
+                lines.append(f"could not restart the worker: {e}")
+
+        return {"ok": True, "release": found["release"],
+                "asset": found["asset"], "log": lines,
+                "version": await asyncio.to_thread(node.master.version),
+                "message": f"llama.cpp {found['release']} installed."}
 
     @app.get("/api/version/check")
     async def version_check():
@@ -651,6 +744,11 @@ def create_app(config: Config) -> FastAPI:
                                     rpc_port=node.rpc_worker.port)
         except rpc.RpcError as e:
             raise HTTPException(400, str(e))
+        saved_ngl = str(config.shard.get("n_gpu_layers", "") or "").strip()
+        if req.n_gpu_layers is not None:
+            result["ngl"] = req.n_gpu_layers
+        elif saved_ngl.isdigit():
+            result["ngl"] = int(saved_ngl)
         split = (req.tensor_split if req.tensor_split is not None
                  else config.shard.get("tensor_split", ""))
         split_ok, split_why = rpc.check_tensor_split(
@@ -683,6 +781,12 @@ def create_app(config: Config) -> FastAPI:
                              else node.rpc_worker.port,
                      "name": w, "node_id": None, "usable": 0}
                     for w in req.workers]
+
+            saved_ngl = str(config.shard.get("n_gpu_layers", "") or "").strip()
+            if req.n_gpu_layers is not None:
+                result["ngl"] = req.n_gpu_layers
+            elif saved_ngl.isdigit():
+                result["ngl"] = int(saved_ngl)
 
             split = (req.tensor_split if req.tensor_split is not None
                      else config.shard.get("tensor_split", ""))

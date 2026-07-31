@@ -289,6 +289,30 @@ class ShardMaster:
         self.last_failure: str | None = None
         self._help: str | None = None
 
+    def version(self) -> str | None:
+        """Which llama.cpp build this is.
+
+        Worth showing, because a good share of load failures are the model
+        file being newer than the build rather than anything to do with the
+        cluster, and the first useful question in that case is what build
+        you are on.
+        """
+        text = self.help_text()
+        match = re.search(r"version:\s*(\S+)", text)
+        if match:
+            return match.group(1)
+        try:
+            r = subprocess.run([self.binary, "--version"],
+                               capture_output=True, text=True, timeout=15,
+                               check=False)
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            match = re.search(r"version:\s*(\S+)", out)
+            if match:
+                return match.group(1)
+            return out.splitlines()[0][:60] if out else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     def help_text(self) -> str:
         """What this llama-server build says about its own options.
 
@@ -336,9 +360,26 @@ class ShardMaster:
         if workers:
             cmd += ["--rpc", ",".join(f"{w['host']}:{w['port']}"
                                       for w in workers)]
-        # -ngl counts layers offloaded to *devices*, and RPC endpoints are
-        # devices, so this is what actually distributes the model.
-        cmd += ["-ngl", str(plan.get("ngl", 999))]
+        # Layer placement is deliberately left to llama.cpp unless somebody
+        # asks otherwise.
+        #
+        # This used to force "-ngl 999", meaning "put every layer on a
+        # device", on the reasoning that RPC endpoints count as devices and
+        # so that is what spreads the model about. It does — and it also
+        # switches off llama.cpp's own fitting, which is the part that
+        # works out what will actually go where. Current builds say so
+        # plainly when they give up:
+        #
+        #   common_fit_params: failed to fit params to free device memory:
+        #   n_gpu_layers already set by user to 999, abort
+        #
+        # On a machine with a graphics card, 999 means trying to put a
+        # twenty-four gigabyte model into a few gigabytes of video memory,
+        # and it stops rather than falling back. Left alone, llama.cpp
+        # measures every device it has, the RPC workers included, and fills
+        # them in proportion.
+        if plan.get("ngl") is not None:
+            cmd += ["-ngl", str(plan["ngl"])]
         cmd += self._flash_attn_args(plan.get("flash_attn", True))
         # How much of the model each machine holds. Left alone, llama.cpp
         # divides the layers in proportion to each device's free memory,
@@ -394,14 +435,17 @@ class ShardMaster:
             # last line, written just before the process died.
             time.sleep(0.4)
             detail = self._failure_detail()
+            meaning = self.explain_failure(detail)
             self.proc = None
             self.plan = None
             self.started_at = None
             raise RpcError(
                 f"llama.cpp stopped while loading the model "
-                f"(exit code {code}).\n\n{detail}\n\n"
-                f"The full output, including the command that was run, is "
-                f"under Load log.")
+                f"(exit code {code})."
+                + (f"\n\n{meaning}" if meaning else "")
+                + f"\n\n{detail}\n\n"
+                  f"The full output, including the command that was run, "
+                  f"is under Load log.")
 
         return self.status()
 
@@ -416,6 +460,59 @@ class ShardMaster:
                     "out of memory", "oom", "no such file", "invalid",
                     "unsupported", "terminate", "assert", "abort",
                     "insufficient", "exception")
+
+    # Things llama.cpp says when it gives up, and what they actually mean
+    # in the context of a cluster. The raw message is accurate and assumes
+    # you already know how llama.cpp allocates memory.
+    _EXPLANATIONS = (
+        ("failed to fit params to free device memory",
+         "The layer count was forced, so llama.cpp could not work out what "
+         "would fit and stopped instead. Clear 'Layers on devices' in "
+         "Settings and let it decide."),
+        ("erroroutofdevicememory",
+         "It ran out of graphics memory. A graphics card holds far less "
+         "than system memory, so a large model needs either more machines "
+         "lending memory or a build without GPU support on this machine "
+         "— re-run the installer here with --gpu cpu."),
+        ("unable to allocate vulkan",
+         "It ran out of graphics memory. Either bring more machines into "
+         "the pool, or re-run the installer on this machine with --gpu cpu "
+         "so the model uses system memory instead."),
+        ("unable to allocate cuda",
+         "It ran out of graphics memory. Either bring more machines into "
+         "the pool, or re-run the installer on this machine with --gpu cpu."),
+        ("not enough memory",
+         "There is not enough memory for this model. Bring more machines "
+         "into the pool, reduce the context window in Settings, or pick a "
+         "smaller model."),
+        ("no such file",
+         "The model file could not be opened. If it is on a network drive "
+         "or an external disk, check it is still attached."),
+        ("unknown model architecture",
+         "llama.cpp does not recognise this model at all. It probably needs "
+         "a newer build — try Update llama.cpp in Settings."),
+        ("wrong type",
+         "The model file and this llama.cpp build disagree about the shape "
+         "of the model's metadata, which means the file is newer than the "
+         "build, or is a variant the build does not handle yet. Nothing to "
+         "do with the cluster — the same file would fail on one machine on "
+         "its own. Try Update llama.cpp in Settings, and if that does not "
+         "help, a different quantisation or a more mainstream model."),
+        ("error loading model hyperparameters",
+         "llama.cpp could not make sense of this model's metadata, so the "
+         "file is either newer than the build or a variant it does not "
+         "handle. Try Update llama.cpp in Settings."),
+        ("failed to allocate compute buffers",
+         "The context window is too large for the memory available. Reduce "
+         "it in Settings and try again."),
+    )
+
+    def explain_failure(self, detail: str) -> str | None:
+        lowered = detail.lower()
+        for needle, meaning in self._EXPLANATIONS:
+            if needle in lowered:
+                return meaning
+        return None
 
     def _failure_detail(self, lines: int = 14) -> str:
         """The part of the output worth reading.
@@ -472,10 +569,13 @@ class ShardMaster:
         if self.proc is None or self.proc.poll() is None:
             return
         code = self.proc.returncode
-        self.last_failure = (
-            f"llama.cpp stopped after {round(time.time() - self.started_at)}s "
-            f"(exit code {code}).\n\n{self._failure_detail()}"
-            if self.started_at else self._failure_detail())
+        detail = self._failure_detail()
+        meaning = self.explain_failure(detail)
+        elapsed = (f" after {round(time.time() - self.started_at)}s"
+                   if self.started_at else "")
+        self.last_failure = (f"llama.cpp stopped{elapsed} (exit code {code})."
+                             + (f"\n\n{meaning}" if meaning else "")
+                             + f"\n\n{detail}")
         self.proc = None
         self.plan = None
         self.started_at = None
@@ -777,7 +877,9 @@ def plan_shard(model_path: str, local: dict, peers: list[dict],
         "pooled_usable": pooled,
         "fits": pooled >= size,
         "shortfall": max(0, size - pooled),
-        "ngl": 999,
+        # None means "do not pass -ngl at all", which lets llama.cpp fit
+        # the layers to the memory it can actually see.
+        "ngl": None,
         "flash_attn": True,
     }
 

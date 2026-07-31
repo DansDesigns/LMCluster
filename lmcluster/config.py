@@ -49,6 +49,7 @@ DEFAULTS = {
         "model_dir": "",            # where .gguf files live
         "ctx": 4096,                # context window to load models with
         "tensor_split": "",         # how to weight layers across machines
+        "n_gpu_layers": "",         # blank = let llama.cpp work it out
         "extra_args": "",           # anything else to pass to llama-server
     },
 }

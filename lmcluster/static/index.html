@@ -374,6 +374,16 @@ pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
             available for the model itself.</p>
         </div>
         <div class="field">
+          <label for="set-ngl">Layers on devices</label>
+          <input id="set-ngl" placeholder="blank = let llama.cpp work it out">
+          <p class="hint">Leave this blank. llama.cpp measures every device
+            it can see, the other machines included, and fits the layers to
+            what is actually there. Putting a number here switches that off
+            — and if the number does not fit, llama.cpp stops rather than
+            falling back, which is a confusing way to fail. Only set it if
+            you have a specific reason.</p>
+        </div>
+        <div class="field">
           <label for="set-split">Share of the model per machine</label>
           <input id="set-split" placeholder="blank = share it out by free memory">
           <p class="hint">One number per machine, this one first:
@@ -473,7 +483,14 @@ pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
       </div>
 
       <div class="panel">
-        <h2>Updates</h2>
+        <h2>llama.cpp</h2>
+        <p class="hint">The engine that actually runs the model. A model
+          that will not load is often simply newer than the build here.</p>
+        <div id="llbox" style="margin-top:.7rem"><p class="empty">checking…</p></div>
+      </div>
+
+      <div class="panel">
+        <h2>LMCluster updates</h2>
         <div id="updbox" style="margin-top:.6rem"><p class="empty">checking…</p></div>
       </div>
     </div>
@@ -498,7 +515,7 @@ document.querySelectorAll('nav button').forEach(b =>
     if (b.dataset.tab === 'pool')     { refreshPool(); listModels(); }
     if (b.dataset.tab === 'chat')     { listChats(); modelBar(); }
     if (b.dataset.tab === 'skills')   { listSkills(); }
-    if (b.dataset.tab === 'settings') { loadSettings(); loadKey(); loadFirewall(); loadUpdate(); }
+    if (b.dataset.tab === 'settings') { loadSettings(); loadKey(); loadFirewall(); loadUpdate(); loadLlama(); }
   }));
 
 /* ---------------- header ---------------- */
@@ -1102,6 +1119,7 @@ async function loadSettings(){
   const L = s.loading || {};
   document.getElementById('set-ctx').value = L.ctx ?? 4096;
   document.getElementById('set-split').value = L.tensor_split || '';
+  document.getElementById('set-ngl').value = L.n_gpu_layers || '';
   document.getElementById('set-extra').value = L.extra_args || '';
 
   const c = s.chat || {};
@@ -1137,6 +1155,7 @@ document.getElementById('set-save').addEventListener('click', async () => {
     repeat_penalty: num('set-rep'), max_tokens: num('set-maxtok'),
     ctx: num('set-ctx'),
     tensor_split: document.getElementById('set-split').value,
+    n_gpu_layers: document.getElementById('set-ngl').value,
     extra_args: document.getElementById('set-extra').value};
   /* Nulls mean "not given", which the server reads as "leave it alone" —
      so an empty box must not silently wipe a saved value. */
@@ -1295,6 +1314,39 @@ async function loadFirewall(){
       setTimeout(loadFirewall, 4000);
     }catch(e){ out.innerHTML = `<span class="no">${esc(e)}</span>`; }
     btn.disabled = false;
+  });
+}
+
+/* ---------------- llama.cpp ---------------- */
+async function loadLlama(){
+  const box = document.getElementById('llbox');
+  if(!box) return;
+  let d;
+  try{ d = await (await fetch('/api/llamacpp')).json(); }
+  catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
+
+  box.innerHTML = d.available
+    ? `<p class="hint">Build <code>${esc(d.version || 'unknown')}</code></p>
+       <div class="row"><button id="llupd">Update llama.cpp</button></div>
+       <div class="hint" id="llres"></div>`
+    : `<p class="hint">${esc(d.problem || 'not installed here')}</p>`;
+
+  const b = document.getElementById('llupd');
+  if(b) b.addEventListener('click', async () => {
+    if(!confirm('Fetch the current llama.cpp release?\n\nThis machine will '
+      + 'stop lending its memory for a moment while the files are replaced.')) return;
+    const out = document.getElementById('llres');
+    b.disabled = true;
+    out.innerHTML = '<span class="spin"></span> downloading — a minute or two';
+    try{
+      const r = await fetch('/api/llamacpp/update', {method:'POST'});
+      const j = await r.json();
+      out.innerHTML = r.ok
+        ? `<span class="ok">${esc(j.message)}</span>`
+        : `<span class="no">${esc(j.detail || r.statusText)}</span>`;
+      if(r.ok) setTimeout(loadLlama, 1500);
+    }catch(e){ out.innerHTML = `<span class="no">${esc(e)}</span>`; }
+    b.disabled = false;
   });
 }
 
