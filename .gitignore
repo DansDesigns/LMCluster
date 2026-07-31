@@ -1,0 +1,12 @@
+# Never commit these — both source zips shipped them.
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Built by install.py
+vendor/
+
+# Local node state
+lmcluster.toml
+*.db

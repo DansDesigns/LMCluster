@@ -1,0 +1,1265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LMCluster</title>
+<style>
+:root{
+  --ink:#10151d; --panel:#171e29; --line:#2a3648;
+  --amber:#e8a33d; --amber-dim:#9c6f2c; --teal:#4fb3a9; --red:#d06b5a;
+  --text:#d8dee6; --muted:#7c8794;
+  --mono:ui-monospace,'Cascadia Mono','JetBrains Mono','DejaVu Sans Mono',Menlo,monospace;
+  --sans:system-ui,'Segoe UI',Roboto,'Noto Sans',sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+  font-size:15px;line-height:1.55}
+header{display:flex;align-items:center;gap:1rem;padding:.85rem 1.5rem;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.strip{display:flex;gap:.9rem;flex-wrap:wrap;align-items:center}
+.mach{display:flex;align-items:center;gap:.4rem;font-family:var(--mono);
+  font-size:.72rem;color:var(--muted)}
+.mach.me{color:var(--text)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;
+  box-shadow:0 0 0 2px rgba(0,0,0,.35)}
+.dot.on{background:var(--teal)}
+.dot.warn{background:var(--amber)}
+.dot.off{background:var(--red)}
+.mach .holding{color:var(--amber);font-size:.62rem}
+h1{font-family:var(--mono);font-size:1rem;letter-spacing:.14em;margin:0;
+  color:var(--amber);font-weight:600}
+h2{font-size:1rem;margin:0 0 .2rem}
+h3{font-size:.9rem;margin:0 0 .2rem}
+.sub{font-family:var(--mono);font-size:.7rem;color:var(--muted)}
+nav{display:flex;gap:.3rem;padding:.6rem 1.5rem;border-bottom:1px solid var(--line);
+  flex-wrap:wrap}
+nav button{background:none;border:1px solid transparent;color:var(--muted);
+  font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;padding:.4rem .8rem;
+  border-radius:4px;cursor:pointer}
+nav button:hover{color:var(--text)}
+nav button.active{color:var(--ink);background:var(--amber);border-color:var(--amber)}
+main{padding:1.5rem;max-width:1500px}
+.tab{display:none}.tab.active{display:block}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:1rem;margin-bottom:1.2rem}
+.grid{display:grid;grid-template-columns:minmax(300px,430px) 1fr;gap:1.2rem;
+  align-items:start}
+@media(max-width:840px){.grid{grid-template-columns:1fr}}
+/* Three columns, with the centre one given the most room since it holds
+   the things you actually act on. */
+.grid3{display:grid;grid-template-columns:minmax(240px,1fr) minmax(320px,1.5fr)
+  minmax(240px,1fr);gap:1.2rem;align-items:start}
+@media(max-width:1200px){.grid3{grid-template-columns:1fr 1fr}
+  .grid3>div:last-child{grid-column:1/-1}}
+@media(max-width:760px){.grid3{grid-template-columns:1fr}
+  .grid3>div:last-child{grid-column:auto}}
+button,input,select,textarea{font-family:inherit;font-size:.85rem}
+button{background:var(--panel);border:1px solid var(--line);color:var(--text);
+  padding:.45rem .85rem;border-radius:4px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--amber);border-color:var(--amber);color:var(--ink);
+  font-weight:600}
+button.primary:hover:not(:disabled){color:var(--ink);filter:brightness(1.1)}
+input,select,textarea{background:var(--ink);border:1px solid var(--line);
+  color:var(--text);padding:.45rem .6rem;border-radius:4px;width:100%}
+textarea{resize:vertical;font-family:var(--mono);font-size:.8rem;line-height:1.5}
+label{display:block;font-family:var(--mono);font-size:.68rem;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.06em;margin-bottom:.3rem}
+.field{margin-bottom:1rem}
+.hint{font-size:.78rem;color:var(--muted);margin:.35rem 0 0}
+.empty{color:var(--muted);font-family:var(--mono);font-size:.78rem;padding:1rem 0}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+code{font-family:var(--mono);font-size:.78rem;color:var(--amber);word-break:break-all}
+
+/* pool */
+.pooltotal{font-family:var(--mono);font-size:1.6rem;color:var(--teal);line-height:1.15}
+.pooltotal small{display:block;font-size:.7rem;color:var(--muted);margin-top:.2rem}
+.poolbar{height:24px;border:1px solid var(--line);border-radius:4px;display:flex;
+  overflow:hidden;background:var(--ink);margin:.7rem 0 .35rem}
+.seg{display:flex;align-items:center;justify-content:center;font-family:var(--mono);
+  font-size:.62rem;font-weight:600;transition:width .4s ease;min-width:0}
+.seg.live{background:var(--teal);color:var(--ink)}
+.seg.spare{background:var(--amber-dim);color:var(--text)}
+.legend{display:flex;gap:1.1rem;font-family:var(--mono);font-size:.65rem;
+  color:var(--muted)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:.35rem}
+.machine{border:1px solid var(--line);border-radius:5px;padding:.7rem .8rem;
+  margin-bottom:.6rem;background:var(--ink)}
+.machine.in{border-left:3px solid var(--teal)}
+.machine.fix{border-left:3px solid var(--amber)}
+.machine.out{border-left:3px solid var(--red)}
+.machine.me{background:var(--panel);border-color:var(--amber-dim)}
+.machine.me .mname::after{content:' — this machine';color:var(--muted);
+  font-size:.68rem}
+.contrib{font-family:var(--mono);font-size:.72rem;color:var(--teal)}
+.contrib.no{color:var(--muted);text-decoration:line-through}
+.sums{margin-top:.7rem;border-top:1px solid var(--line);padding-top:.6rem}
+.sumrow{display:grid;grid-template-columns:1fr auto;gap:.6rem;
+  font-family:var(--mono);font-size:.7rem;color:var(--muted);padding:.12rem 0}
+.sumrow.in{color:var(--text)}
+.sumrow.total{border-top:1px solid var(--line);margin-top:.35rem;
+  padding-top:.35rem;color:var(--teal)}
+.mhead{display:flex;justify-content:space-between;align-items:baseline;gap:.6rem;
+  flex-wrap:wrap}
+.mname{font-family:var(--mono);font-size:.85rem}
+.tag{font-family:var(--mono);font-size:.62rem;padding:.12rem .45rem;border-radius:3px;
+  letter-spacing:.04em;white-space:nowrap}
+.tag.in{background:var(--teal);color:var(--ink)}
+.tag.fix{background:var(--amber);color:var(--ink)}
+.tag.out{background:var(--red);color:var(--ink)}
+.mmem{font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:.25rem}
+.why{font-size:.8rem;margin-top:.5rem}
+.fix{font-size:.78rem;color:var(--muted);margin-top:.3rem;
+  border-left:2px solid var(--line);padding-left:.6rem}
+.link{font-family:var(--mono);font-size:.62rem;padding:.1rem .4rem;border-radius:3px;
+  border:1px solid var(--line);color:var(--muted)}
+.link.bad{border-color:var(--red);color:var(--red)}
+.link.warn{border-color:var(--amber);color:var(--amber)}
+.link.good{border-color:var(--teal);color:var(--teal)}
+.devs{display:flex;gap:.35rem;flex-wrap:wrap;margin-top:.4rem}
+.dev{font-family:var(--mono);font-size:.62rem;padding:.1rem .4rem;border-radius:3px;
+  border:1px solid var(--line);color:var(--muted)}
+.dev.gpu{border-color:var(--teal);color:var(--teal)}
+.advice{border:1px solid var(--line);border-left:3px solid var(--amber);
+  border-radius:4px;padding:.6rem .75rem;margin-top:.6rem;background:var(--ink)}
+.advice.bad{border-left-color:var(--red)}
+.advice p{margin:0;font-size:.79rem;color:var(--muted)}
+.advice strong{color:var(--text)}
+.verdict{font-family:var(--mono);font-size:.78rem;padding:.7rem .85rem;
+  border-radius:4px;border:1px solid var(--line);margin-top:.8rem;line-height:1.6}
+.verdict.yes{border-left:3px solid var(--teal)}
+.verdict.no{border-left:3px solid var(--red)}
+.verdict.solo{border-left:3px solid var(--amber)}
+pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
+  padding:.6rem;font-family:var(--mono);font-size:.7rem;max-height:240px;
+  overflow:auto;color:var(--muted);white-space:pre-wrap;margin:.6rem 0 0}
+
+/* chat */
+.msgs{min-height:240px;max-height:56vh;overflow-y:auto;padding-right:.3rem}
+.msg{margin-bottom:1rem}
+.who{font-family:var(--mono);font-size:.65rem;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.07em;margin-bottom:.25rem}
+.msg.you .who{color:var(--amber)}
+.msg.model .who{color:var(--teal)}
+.body{white-space:pre-wrap}
+.stats{font-family:var(--mono);font-size:.65rem;color:var(--muted);margin-top:.35rem}
+.chatlist div{padding:.45rem .3rem;border-bottom:1px solid var(--line);
+  cursor:pointer;font-size:.82rem}
+.chatlist div:hover{color:var(--amber)}
+.spin{display:inline-block;width:9px;height:9px;border:2px solid var(--muted);
+  border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.spin{animation-duration:2s}.seg{transition:none}}
+
+/* skills */
+.skill{border:1px solid var(--line);border-radius:5px;padding:.6rem .75rem;
+  margin-bottom:.5rem;background:var(--ink);cursor:pointer}
+.skill:hover{border-color:var(--amber)}
+.skill h4{margin:0;font-size:.85rem;font-family:var(--mono)}
+.skill p{margin:.2rem 0 0;font-size:.78rem;color:var(--muted)}
+.keyval{font-family:var(--mono);font-size:.85rem;color:var(--amber);
+  background:var(--ink);border:1px solid var(--line);border-radius:4px;
+  padding:.55rem .7rem;word-break:break-all;user-select:all}
+.danger{border:1px solid var(--red);border-radius:4px;padding:.7rem .8rem;
+  margin-top:1rem;background:var(--ink)}
+.danger.mild{border-color:var(--line)}
+.danger h4{font-family:var(--mono);font-size:.7rem;text-transform:uppercase;
+  letter-spacing:.05em;color:var(--red);margin:0 0 .35rem}
+.danger.mild h4{color:var(--text)}
+.danger p{margin:0 0 .6rem;font-size:.79rem;color:var(--muted)}
+.ok{color:var(--teal)}.no{color:var(--red)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:0 1rem}
+.fwlist{display:flex;flex-direction:column;gap:.35rem;margin-bottom:.6rem}
+.fwrow{display:grid;grid-template-columns:auto 1fr auto;gap:.6rem;
+  align-items:baseline;font-family:var(--mono);font-size:.72rem;
+  padding:.3rem .5rem;border:1px solid var(--line);border-radius:4px;
+  background:var(--ink)}
+@media(max-width:560px){.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>LMCLUSTER</h1>
+  <div class="strip" id="strip"><span class="sub">connecting…</span></div>
+  <span class="sub" id="modelbar"></span>
+</header>
+
+<nav>
+  <button class="active" data-tab="pool">POOL</button>
+  <button data-tab="chat">CHAT</button>
+  <button data-tab="skills">SKILLS</button>
+  <button data-tab="settings">SETTINGS</button>
+</nav>
+
+<main>
+
+<!-- ============ POOL ============ -->
+<section id="pool" class="tab active">
+  <div class="grid">
+
+    <div>
+      <div class="panel">
+        <h2>Machines <span class="sub" id="mcount"></span></h2>
+        <div id="machines"><p class="empty">looking…</p></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>Memory pool</h2>
+        <div class="pooltotal" id="pool-total"><span class="spin"></span></div>
+        <div class="poolbar" id="pool-bar"></div>
+        <div class="legend">
+          <span><i style="background:var(--teal)"></i>in the pool</span>
+          <span><i style="background:var(--amber-dim)"></i>available</span>
+        </div>
+        <div id="pool-breakdown"></div>
+        <p class="hint" id="pool-note"></p>
+      </div>
+
+      <div class="panel">
+        <h2>Load a model</h2>
+        <div class="row" style="margin-top:.7rem">
+          <select id="model-pick" style="flex:1;min-width:180px">
+            <option value="">loading…</option>
+          </select>
+          <label style="margin:0;display:flex;align-items:center;gap:.4rem;
+                        text-transform:none;letter-spacing:0">context
+            <input id="ctx" type="number" value="4096" min="512" step="512"
+                   style="width:86px">
+          </label>
+        </div>
+        <div class="row" style="margin-top:.6rem">
+          <button id="check">Check first</button>
+          <button id="go" class="primary" disabled>Load across the pool</button>
+          <button id="stop" style="display:none">Unload</button>
+          <button id="showlog">Load log</button>
+        </div>
+        <p class="hint" id="model-dir"></p>
+        <div id="verdict"></div>
+        <pre class="log" id="log" style="display:none"></pre>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ CHAT ============ -->
+<section id="chat" class="tab">
+  <div class="grid">
+    <div class="panel">
+      <h3>Saved conversations</h3>
+      <div class="row" style="margin:.6rem 0">
+        <button id="newchat">New conversation</button>
+      </div>
+      <div class="chatlist" id="chatlist"><p class="empty">none yet</p></div>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="msgs" id="msgs">
+          <p class="empty" id="chat-empty">No model loaded yet. Load one on the
+            Pool page and it will answer here.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="field" style="margin-bottom:.6rem">
+          <textarea id="prompt" rows="3"
+            placeholder="Ask it something. Ctrl+Enter sends."></textarea>
+        </div>
+        <div class="row">
+          <button id="send" class="primary">Send</button>
+          <span class="sub" id="chat-status"></span>
+          <span class="sub" id="sysnote" style="margin-left:auto"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SKILLS ============ -->
+<section id="skills" class="tab">
+  <div class="grid3">
+
+    <div>
+      <div class="panel">
+        <h2>Have the model write one</h2>
+        <p class="hint">Describe what you want. The loaded model writes the
+          Python, and you read it before it is saved.</p>
+        <div class="field" style="margin-top:.7rem">
+          <textarea id="gen-desc" rows="4"
+            placeholder="e.g. take a list of numbers and return the mean, median and standard deviation"></textarea>
+        </div>
+        <button id="gen" class="primary">Write it</button>
+        <p class="hint" id="gen-status"></p>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2 id="editor-title">Skill editor</h2>
+        <div class="field" style="margin-top:.7rem">
+          <label for="skill-id">Filename</label>
+          <input id="skill-id" placeholder="letters, numbers, dashes">
+        </div>
+        <div class="field">
+          <label for="skill-src">Python</label>
+          <textarea id="skill-src" rows="18"
+            placeholder="Pick a skill to edit, or have the model write one."></textarea>
+        </div>
+        <div class="row">
+          <button id="skill-save" class="primary">Save</button>
+          <button id="skill-run">Run it</button>
+          <button id="skill-del">Delete</button>
+        </div>
+        <div class="field" style="margin-top:.8rem">
+          <label for="skill-in">Inputs, as JSON</label>
+          <input id="skill-in" value="{}">
+        </div>
+        <pre class="log" id="skill-out" style="display:none"></pre>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>Saved skills</h2>
+        <div id="skill-list"><p class="empty">loading…</p></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section id="settings" class="tab">
+  <div class="grid3">
+
+    <div>
+      <div class="panel">
+        <h2>This machine</h2>
+        <div class="field" style="margin-top:.7rem">
+          <label for="set-name">Name on the cluster</label>
+          <input id="set-name" placeholder="defaults to the hostname">
+        </div>
+        <div class="field">
+          <label for="set-dir">Folder holding your .gguf files</label>
+          <input id="set-dir" placeholder="leave blank to search the usual places">
+          <p class="hint" id="set-dir-hint"></p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label style="display:flex;align-items:center;gap:.5rem;
+                        text-transform:none;letter-spacing:0;font-size:.82rem;
+                        color:var(--text)">
+            <input type="checkbox" id="set-auto" style="width:auto">
+            Lend this machine's memory automatically when it starts up
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>How models get loaded</h2>
+        <p class="hint">These apply the next time you load a model. They do
+          not affect one that is already running.</p>
+        <div class="field" style="margin-top:.8rem">
+          <label for="set-ctx">Context window, in tokens</label>
+          <input id="set-ctx" type="number" min="512" step="512">
+          <p class="hint">How much conversation the model can see at once.
+            Larger costs memory on every machine, so it comes out of what is
+            available for the model itself.</p>
+        </div>
+        <div class="field">
+          <label for="set-split">Share of the model per machine</label>
+          <input id="set-split" placeholder="blank = share it out by free memory">
+          <p class="hint">One number per machine, this one first:
+            <code>3,2,1</code>. Left blank, llama.cpp divides the layers by
+            how much memory each machine has free, which is usually right.
+            Set it by hand when memory is a poor guide — an old laptop with
+            plenty of free RAM and a slow processor will take a third of the
+            model and then hold everything else up.</p>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label for="set-extra">Anything else to pass to llama.cpp</label>
+          <input id="set-extra" placeholder="e.g. --threads 6 --mlock">
+          <p class="hint">Passed through untouched. Wrong options here will
+            stop a model loading; the load log on the Pool page will say
+            why.</p>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>How the model behaves</h2>
+        <p class="hint">Applies to your next message. No reloading needed.</p>
+        <div class="field" style="margin-top:.8rem">
+          <label for="set-sys">System prompt</label>
+          <textarea id="set-sys" rows="5"
+            placeholder="Leave blank for none.&#10;&#10;e.g. You are a concise assistant. Answer in British English. If you are unsure, say so rather than guessing."></textarea>
+          <p class="hint">Sent ahead of every conversation to set the
+            model's manner. Blank means none at all, which is a valid
+            choice — some models behave better without one.</p>
+        </div>
+
+        <div class="two">
+          <div class="field">
+            <label for="set-temp">Temperature</label>
+            <input id="set-temp" type="number" min="0" max="2" step="0.05">
+            <p class="hint">0 is repeatable and dull, 1 is varied, above
+              that it wanders.</p>
+          </div>
+          <div class="field">
+            <label for="set-maxtok">Reply limit, in tokens</label>
+            <input id="set-maxtok" type="number" min="0" step="64">
+            <p class="hint">0 means no limit. Useful on a slow cluster to
+              stop a rambling answer taking ten minutes.</p>
+          </div>
+          <div class="field">
+            <label for="set-topp">Top-p</label>
+            <input id="set-topp" type="number" min="0" max="1" step="0.01">
+            <p class="hint">Considers only the most likely words adding up
+              to this probability.</p>
+          </div>
+          <div class="field">
+            <label for="set-topk">Top-k</label>
+            <input id="set-topk" type="number" min="0" step="1">
+            <p class="hint">Considers at most this many words at each
+              step. 0 turns it off.</p>
+          </div>
+          <div class="field">
+            <label for="set-minp">Min-p</label>
+            <input id="set-minp" type="number" min="0" max="1" step="0.01">
+            <p class="hint">Drops words far less likely than the best one.</p>
+          </div>
+          <div class="field">
+            <label for="set-rep">Repetition penalty</label>
+            <input id="set-rep" type="number" min="1" max="2" step="0.01">
+            <p class="hint">Above 1 discourages repeating itself. Too high
+              makes it avoid ordinary words.</p>
+          </div>
+        </div>
+        <div class="row">
+          <button id="set-reset">Back to defaults</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <button id="set-save" class="primary">Save everything</button>
+          <span class="hint" id="set-status"></span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>Cluster key</h2>
+        <p class="hint">The shared secret deciding which machines belong to
+          this cluster. They all need the same one.</p>
+        <div id="keybox" style="margin-top:.8rem"><p class="empty">checking…</p></div>
+      </div>
+
+      <div class="panel">
+        <h2>Network ports</h2>
+        <p class="hint">Three ports have to be reachable for a cluster to
+          work. A blocked one is confusing rather than obvious: a machine
+          can look perfectly healthy and still be invisible to the others.</p>
+        <div id="fwbox" style="margin-top:.8rem"><p class="empty">checking…</p></div>
+      </div>
+
+      <div class="panel">
+        <h2>Updates</h2>
+        <div id="updbox" style="margin-top:.6rem"><p class="empty">checking…</p></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</main>
+
+<script>
+const GB = 1e9;
+const gb = b => b == null ? '?' : (b / GB).toFixed(1) + ' GB';
+const esc = t => String(t == null ? '' : t)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+document.querySelectorAll('nav button').forEach(b =>
+  b.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(x =>
+      x.classList.toggle('active', x === b));
+    document.querySelectorAll('.tab').forEach(s =>
+      s.classList.toggle('active', s.id === b.dataset.tab));
+    if (b.dataset.tab === 'pool')     { refreshPool(); listModels(); }
+    if (b.dataset.tab === 'chat')     { listChats(); modelBar(); }
+    if (b.dataset.tab === 'skills')   { listSkills(); }
+    if (b.dataset.tab === 'settings') { loadSettings(); loadKey(); loadFirewall(); loadUpdate(); }
+  }));
+
+/* ---------------- header ---------------- */
+/* One dot per machine, so the state of the whole cluster is visible from
+   every page without going and looking. Green means it is lending its
+   memory, amber means it is switched on but contributing nothing, and red
+   means it has stopped announcing itself. A machine that drops off stays
+   in the list rather than quietly vanishing, because its disappearance is
+   the thing worth noticing. */
+const DOT = {lending:'on', idle:'warn', unable:'warn', offline:'off'};
+const WHY = {
+  lending: 'lending its memory',
+  idle:    'switched on but not lending its memory',
+  unable:  'llama.cpp here has no RPC support',
+  offline: 'not answering — switched off, asleep, or off the network'};
+
+async function modelBar(){
+  try{
+    const c = await (await fetch('/api/cluster')).json();
+    document.getElementById('strip').innerHTML = c.machines.map(m => `
+      <span class="mach ${m.self ? 'me' : ''}" title="${esc(WHY[m.state] || '')}">
+        <i class="dot ${DOT[m.state] || 'warn'}"></i>${esc(m.name)}${
+        m.holding_model ? '<span class="holding">◆</span>' : ''}</span>`).join('');
+  }catch(e){
+    document.getElementById('strip').innerHTML =
+      '<span class="sub">cannot reach this machine</span>';
+  }
+  try{
+    const s = await (await fetch('/api/settings')).json();
+    const sys = (s.chat || {}).system_prompt;
+    const el = document.getElementById('sysnote');
+    if(el) el.textContent = sys ? 'A system prompt is set — see Settings.' : '';
+  }catch(e){}
+  try{
+    const m = await (await fetch('/api/model')).json();
+    document.getElementById('modelbar').textContent = m.loaded
+      ? `holding ${m.model} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
+      : 'no model loaded';
+  }catch(e){}
+}
+
+/* ---------------- pool ---------------- */
+function linkTag(link){
+  if(!link || !link.type) return '';
+  const sev = (link.warnings || []).map(w => w.severity);
+  const cls = sev.includes('bad') ? 'bad' : sev.includes('warn') ? 'warn'
+            : sev.includes('good') ? 'good' : '';
+  let t = link.type === 'wifi'
+    ? 'Wi-Fi' + (link.band ? ' ' + link.band : ' (band unknown)')
+    : link.type;
+  if(link.speed_mbps) t += ' · ' + link.speed_mbps + ' Mbps';
+  return `<span class="link ${cls}">${esc(t)}</span>`;
+}
+
+function devList(devices){
+  /* What llama.cpp is genuinely able to use on that machine. Shown
+     separately from the memory figures because the two can disagree: a
+     graphics card is only in the pool if the llama.cpp build there knows
+     about it. */
+  if(!devices || !devices.length) return '';
+  return '<div class="devs">' + devices.map(d => {
+    const gpu = !/^cpu/i.test(d.id);
+    return `<span class="dev ${gpu ? 'gpu' : ''}">${esc(d.id)}
+      ${d.free ? '· ' + gb(d.free) : ''}</span>`;
+  }).join('') + '</div>';
+}
+
+function advice(warnings, who){
+  return (warnings || []).filter(w => w.severity !== 'good').map(w => `
+    <div class="advice ${w.severity}"><p>${esc(who)} — ${esc(w.message)}
+    ${w.fix ? '<strong>' + esc(w.fix) + '</strong>' : ''}</p></div>`).join('');
+}
+
+function machineCard(m, contrib){
+  /* One card per machine, this machine included and first. Keeping them in
+     one list rather than two panels means the pool total can be read
+     straight down the column it is made of. */
+  const cls = m.self
+    ? (m.offering ? 'in me' : (m.can_shard ? 'fix me' : 'out me'))
+    : (m.in_pool ? 'in' : (m.remotely_fixable ? 'fix' : 'out'));
+  const tag = m.self
+    ? (m.offering ? 'lending' : (m.can_shard ? 'not lending' : 'unavailable'))
+    : m.label;
+  const share = contrib
+    ? `<span class="contrib ${contrib.counted ? '' : 'no'}">${gb(contrib.bytes)}</span>`
+    : '';
+  return `<div class="machine ${cls}">
+    <div class="mhead">
+      <span class="mname">${esc(m.name)}${
+        m.self ? '' : ` <span class="sub">${esc(m.ip || '')}</span>`}</span>
+      <span class="tag ${cls.split(' ')[0]}">${esc(tag)}</span>
+    </div>
+    <div class="mmem">${gb(m.ram_free)} free of ${gb(m.ram_total)}
+      ${m.gpu && m.gpu !== 'none' ? '· ' + esc(m.gpu) : ''}
+      ${m.vram_free ? '· ' + gb(m.vram_free) + ' vram' : ''}
+      ${linkTag(m.link)} ${share}</div>
+    ${m.self && m.shard_problem
+      ? `<div class="why">${esc(m.shard_problem)}</div>` : ''}
+    ${!m.self && !m.in_pool
+      ? `<div class="why">${esc(m.meaning)}</div>${
+          m.fix ? `<div class="fix">${esc(m.fix)}</div>` : ''}` : ''}
+    ${m.self
+      ? `<div class="row" style="margin-top:.55rem">
+           <button id="offer" data-act="${m.offering ? 'stop' : 'start'}"
+             ${m.can_shard ? '' : 'disabled'}>${
+             m.offering ? 'Leave the pool' : 'Join the pool'}</button>
+         </div>`
+      : (m.remotely_fixable
+         ? `<div class="row" style="margin-top:.55rem">
+              <button class="fixbtn" data-id="${m.id}" data-name="${esc(m.name)}">
+              ${m.reason === 'refused' ? 'Restart its worker'
+                                       : 'Start its worker'}</button>
+            </div>` : '')}
+    ${advice(m.link && m.link.warnings, m.self ? 'This machine' : m.name)}
+    ${m.gpu_warning ? advice([m.gpu_warning], m.self ? 'This machine' : m.name) : ''}
+  </div>`;
+}
+
+async function refreshPool(){
+  let d;
+  try{ d = await (await fetch('/api/pool')).json(); }
+  catch(e){ document.getElementById('machines').innerHTML =
+    '<p class="empty">cannot reach this machine</p>'; return; }
+  const s = d.summary, L = d.local;
+
+  document.getElementById('pool-total').innerHTML =
+    `${gb(s.live_bytes)}<small>usable from this machine, across ` +
+    `${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
+    (s.potential_bytes > s.live_bytes
+      ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
+
+  const max = Math.max(s.potential_bytes, 1);
+  const a = s.live_bytes / max * 100, b = (s.potential_bytes - s.live_bytes) / max * 100;
+  document.getElementById('pool-bar').innerHTML =
+    (a > 0 ? `<div class="seg live" style="width:${a}%">${a > 20 ? gb(s.live_bytes) : ''}</div>` : '') +
+    (b > 0 ? `<div class="seg spare" style="width:${b}%">${b > 20 ? '+' + gb(s.potential_bytes - s.live_bytes) : ''}</div>` : '');
+
+  /* The arithmetic, written out. Two machines will often disagree about
+     the total, and showing which machines went into it turns that from a
+     worry into something you can read. */
+  document.getElementById('pool-breakdown').innerHTML =
+    `<div class="sums">` + (s.breakdown || []).map(x =>
+      `<div class="sumrow ${x.counted ? 'in' : ''}">
+         <span>${x.counted ? '' : '— '}${esc(x.name)}
+           <span class="sub">${esc(x.why)}</span></span>
+         <span>${x.counted ? gb(x.bytes) : '—'}</span>
+       </div>`).join('') +
+    `<div class="sumrow total"><span>usable from here</span>
+       <span>${gb(s.live_bytes)}</span></div></div>`;
+
+  const notes = [];
+  if(s.fixable) notes.push(`${s.fixable} machine${s.fixable === 1 ? '' : 's'} could join with one click.`);
+  if(s.blocked) notes.push(`${s.blocked} need${s.blocked === 1 ? 's' : ''} attention.`);
+  if(s.slowest_link) notes.push(`Slowest connection: ${s.slowest_link.node}. ` +
+    `Every machine waits on the slowest one, because the layers run in order.`);
+  notes.push('Another machine may show a different total: each counts its ' +
+    'own memory plus whichever others it can reach.');
+  document.getElementById('pool-note').textContent = notes.join(' ');
+
+  /* This machine first, then the rest. */
+  const byName = {};
+  (s.breakdown || []).forEach(x => { byName[x.name] = x; });
+  const self = {...L, self: true, offering: L.offering_memory};
+  const cards = [machineCard(self, byName[L.name])]
+    .concat(d.peers.map(p => machineCard(p, byName[p.name])));
+
+  document.getElementById('mcount').textContent =
+    d.peers.length ? `— ${s.ready + 1} of ${d.peers.length + 1} contributing` : '';
+  document.getElementById('machines').innerHTML = cards.join('') +
+    (d.peers.length ? '' : `<p class="empty">No other machines yet. Install
+      LMCluster on another one using the same cluster key and it will turn
+      up here.</p>`);
+
+  document.getElementById('machines').querySelectorAll('.fixbtn').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+      try{
+        const r = await fetch(`/api/pool/peers/${btn.dataset.id}/start`,
+                              {method:'POST'});
+        if(!r.ok){ const j = await r.json().catch(()=>({}));
+          alert(`Could not start the worker on ${btn.dataset.name}:\n\n${j.detail || r.statusText}`); }
+      }catch(e){ alert(e); }
+      setTimeout(refreshPool, 1400);
+    }));
+
+  const ob = document.getElementById('offer');
+  if(ob) ob.addEventListener('click', async e => {
+    const act = e.target.dataset.act;
+    e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span>';
+    try{ await fetch('/api/pool/offer/' + act, {method:'POST'}); }
+    catch(err){ alert(err); }
+    setTimeout(refreshPool, 900);
+  });
+
+  modelBar();
+  const running = d.model.loaded;
+  document.getElementById('stop').style.display = running ? '' : 'none';
+  document.getElementById('go').style.display = running ? 'none' : '';
+}
+
+async function listModels(){
+  const sel = document.getElementById('model-pick');
+  try{
+    const d = await (await fetch('/api/models')).json();
+    document.getElementById('model-dir').textContent = d.error
+      ? d.error : `${d.models.length} model file(s) in ${d.model_dir}`;
+    sel.innerHTML = d.models.length
+      ? d.models.map(m => `<option value="${esc(m.path)}">${esc(m.name)} — ${gb(m.size)}</option>`).join('')
+      : '<option value="">no .gguf files found</option>';
+  }catch(e){ sel.innerHTML = '<option value="">could not list models</option>'; }
+}
+
+async function planOrLoad(load){
+  const path = document.getElementById('model-pick').value;
+  const v = document.getElementById('verdict');
+  if(!path){ v.innerHTML = '<div class="verdict no">Choose a model first.</div>'; return; }
+  const ctx = parseInt(document.getElementById('ctx').value) || 4096;
+  v.innerHTML = `<div class="verdict"><span class="spin"></span> ${load ? 'loading — this can take a while' : 'checking'}</div>`;
+  let d;
+  try{
+    const r = await fetch(load ? '/api/load' : '/api/plan', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model_path:path, ctx})});
+    d = await r.json();
+    if(!r.ok){ v.innerHTML = `<div class="verdict no">${esc(d.detail || r.statusText)}</div>`; return; }
+  }catch(e){ v.innerHTML = `<div class="verdict no">${esc(e)}</div>`; return; }
+
+  const plan = d.plan || (d.status && d.status.plan);
+  const cls = !plan ? 'yes' : !plan.fits ? 'no'
+            : plan.workers.length === 0 ? 'solo' : 'yes';
+  let html = `<div class="verdict ${cls}">${esc(d.explanation || '')}</div>`;
+  if(d.excluded && d.excluded.length){
+    html += `<p class="hint">Not counted: ` +
+      d.excluded.map(p => `${esc(p.name)} (${esc(p.label.toLowerCase())})`).join(', ') +
+      `. Sort those out in the machine list to grow the pool.</p>`;
+  }
+  v.innerHTML = html;
+  document.getElementById('go').disabled = !(plan && plan.fits);
+  if(load){ setTimeout(refreshPool, 800); showLog(); }
+}
+
+document.getElementById('check').addEventListener('click', () => planOrLoad(false));
+document.getElementById('go').addEventListener('click', () => planOrLoad(true));
+document.getElementById('stop').addEventListener('click', async () => {
+  await fetch('/api/unload', {method:'POST'}); refreshPool();
+});
+
+async function showLog(){
+  const pre = document.getElementById('log');
+  pre.style.display = '';
+  try{
+    const d = await (await fetch('/api/load/log')).json();
+    pre.textContent = d.log.join('\n') || 'nothing logged yet';
+    pre.scrollTop = pre.scrollHeight;
+  }catch(e){ pre.textContent = String(e); }
+}
+document.getElementById('showlog').addEventListener('click', showLog);
+
+/* ---------------- chat ---------------- */
+let chatId = null, history = [], sending = false;
+
+function renderMsgs(){
+  const box = document.getElementById('msgs');
+  if(!history.length){
+    box.innerHTML = '<p class="empty">Nothing yet. Ask it something below.</p>';
+    return;
+  }
+  box.innerHTML = history.map(m => `
+    <div class="msg ${m.role === 'user' ? 'you' : 'model'}">
+      <div class="who">${m.role === 'user' ? 'you' : 'model'}</div>
+      <div class="body">${esc(m.content)}</div>
+      ${m.stats ? `<div class="stats">${esc(m.stats)}</div>` : ''}
+    </div>`).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function send(){
+  if(sending) return;
+  const ta = document.getElementById('prompt');
+  const text = ta.value.trim();
+  if(!text) return;
+  sending = true;
+  ta.value = '';
+  history.push({role:'user', content:text});
+  const reply = {role:'assistant', content:'', stats:''};
+  history.push(reply);
+  renderMsgs();
+  const status = document.getElementById('chat-status');
+  status.innerHTML = '<span class="spin"></span> waiting for the first token';
+
+  try{
+    const r = await fetch('/api/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:text, chat_id:chatId,
+        history:history.slice(0,-2)})});
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for(const line of lines){
+        if(!line.trim()) continue;
+        let c; try{ c = JSON.parse(line); }catch(e){ continue; }
+        if(c.chat_id) chatId = c.chat_id;
+        if(c.delta){ reply.content += c.delta; status.textContent = 'answering'; renderMsgs(); }
+        if(c.error){ reply.content = c.error; reply.stats = ''; renderMsgs(); }
+        if(c.done && !c.error){
+          const bits = [];
+          if(c.first_token) bits.push(`first token after ${c.first_token}s`);
+          if(c.words_per_second) bits.push(`${c.words_per_second} words/sec`);
+          if(c.seconds) bits.push(`${c.seconds}s total`);
+          reply.stats = bits.join(' · ');
+          renderMsgs();
+        }
+      }
+    }
+  }catch(e){ reply.content = 'Request failed: ' + e; renderMsgs(); }
+  status.textContent = '';
+  sending = false;
+  listChats();
+}
+
+document.getElementById('send').addEventListener('click', send);
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); send(); }
+});
+document.getElementById('newchat').addEventListener('click', () => {
+  chatId = null; history = []; renderMsgs();
+});
+
+async function listChats(){
+  const box = document.getElementById('chatlist');
+  try{
+    const cs = await (await fetch('/api/chats')).json();
+    box.innerHTML = cs.length ? cs.map(c =>
+      `<div data-id="${c.id}">${esc(c.title)}
+        <div class="sub">${c.messages} message${c.messages === 1 ? '' : 's'}</div>
+      </div>`).join('') : '<p class="empty">none yet</p>';
+    box.querySelectorAll('div[data-id]').forEach(el =>
+      el.addEventListener('click', async () => {
+        chatId = el.dataset.id;
+        history = await (await fetch('/api/chats/' + chatId)).json();
+        renderMsgs();
+      }));
+  }catch(e){}
+}
+
+/* ---------------- skills ---------------- */
+async function listSkills(){
+  const box = document.getElementById('skill-list');
+  try{
+    const ss = await (await fetch('/api/skills')).json();
+    box.innerHTML = ss.length ? ss.map(s => `
+      <div class="skill" data-id="${esc(s.id)}">
+        <h4>${esc(s.name)}</h4>
+        <p>${esc(s.description || s.id)}</p>
+      </div>`).join('') : '<p class="empty">none yet</p>';
+    box.querySelectorAll('.skill').forEach(el =>
+      el.addEventListener('click', async () => {
+        const s = await (await fetch('/api/skills/' + el.dataset.id)).json();
+        document.getElementById('skill-id').value = s.id;
+        document.getElementById('skill-src').value = s.source || '';
+        document.getElementById('skill-in').value =
+          JSON.stringify(exampleInputs(s.inputs));
+        document.getElementById('editor-title').textContent = s.name || s.id;
+      }));
+  }catch(e){}
+}
+
+function exampleInputs(spec){
+  /* Turn the skill's declared input types into a starting point, so the
+     inputs box is not just an empty {} the user has to guess at. */
+  const out = {};
+  for(const [k, t] of Object.entries(spec || {})){
+    out[k] = t === 'number' ? 0 : t === 'boolean' ? false
+           : t === 'list' ? [] : t === 'dict' ? {} : '';
+  }
+  return out;
+}
+
+document.getElementById('gen').addEventListener('click', async () => {
+  const desc = document.getElementById('gen-desc').value.trim();
+  if(!desc) return;
+  const st = document.getElementById('gen-status');
+  st.innerHTML = '<span class="spin"></span> the model is writing it — this may take a few minutes';
+  try{
+    const r = await fetch('/api/skills/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({description:desc})});
+    const d = await r.json();
+    if(!r.ok){ st.innerHTML = `<span class="no">${esc(d.detail || r.statusText)}</span>`; return; }
+    document.getElementById('skill-src').value = d.source;
+    document.getElementById('skill-id').value =
+      (d.name || 'new-skill').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+    document.getElementById('editor-title').textContent = d.name || 'New skill';
+    st.innerHTML = d.valid
+      ? `<span class="ok">Written in ${d.seconds}s and it compiles. Read it, then save.</span>`
+      : `<span class="no">Written in ${d.seconds}s but it has problems: ${esc(d.problems.join('; '))}</span>`;
+  }catch(e){ st.innerHTML = `<span class="no">${esc(e)}</span>`; }
+});
+
+document.getElementById('skill-save').addEventListener('click', async () => {
+  const id = document.getElementById('skill-id').value.trim();
+  const src = document.getElementById('skill-src').value;
+  if(!id || !src) return;
+  const out = document.getElementById('skill-out');
+  out.style.display = '';
+  try{
+    const r = await fetch('/api/skills/' + id, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source:src})});
+    const d = await r.json();
+    out.textContent = r.ok
+      ? 'Saved.' + (d.warnings && d.warnings.length ? '\n' + d.warnings.join('\n') : '')
+      : 'Not saved: ' + JSON.stringify(d.detail, null, 1);
+  }catch(e){ out.textContent = String(e); }
+  listSkills();
+});
+
+document.getElementById('skill-run').addEventListener('click', async () => {
+  const id = document.getElementById('skill-id').value.trim();
+  const out = document.getElementById('skill-out');
+  out.style.display = '';
+  let inputs = {};
+  try{ inputs = JSON.parse(document.getElementById('skill-in').value || '{}'); }
+  catch(e){ out.textContent = 'The inputs box is not valid JSON.'; return; }
+  out.innerHTML = '<span class="spin"></span> running';
+  try{
+    const r = await fetch(`/api/skills/${id}/run`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({inputs})});
+    out.textContent = JSON.stringify(await r.json(), null, 1);
+  }catch(e){ out.textContent = String(e); }
+});
+
+document.getElementById('skill-del').addEventListener('click', async () => {
+  const id = document.getElementById('skill-id').value.trim();
+  if(!id || !confirm(`Delete the skill "${id}"?`)) return;
+  await fetch('/api/skills/' + id, {method:'DELETE'});
+  document.getElementById('skill-src').value = '';
+  document.getElementById('skill-id').value = '';
+  listSkills();
+});
+
+/* ---------------- settings ---------------- */
+const FIELDS = {
+  'set-sys':'system_prompt', 'set-temp':'temperature', 'set-topp':'top_p',
+  'set-topk':'top_k', 'set-minp':'min_p', 'set-rep':'repeat_penalty',
+  'set-maxtok':'max_tokens'};
+const DEFAULTS = {system_prompt:'', temperature:0.7, top_p:0.95, top_k:40,
+                  min_p:0.05, repeat_penalty:1.1, max_tokens:0};
+
+async function loadSettings(){
+  let s;
+  try{ s = await (await fetch('/api/settings')).json(); }catch(e){ return; }
+  document.getElementById('set-name').value = s.name || '';
+  document.getElementById('set-dir').value = s.model_dir || '';
+  document.getElementById('set-auto').checked = !!s.auto_start_worker;
+  document.getElementById('set-dir-hint').textContent = s.model_dir
+    ? '' : (s.model_dir_in_use
+            ? `Currently using ${s.model_dir_in_use}`
+            : 'Nothing found yet in the usual places.');
+
+  const L = s.loading || {};
+  document.getElementById('set-ctx').value = L.ctx ?? 4096;
+  document.getElementById('set-split').value = L.tensor_split || '';
+  document.getElementById('set-extra').value = L.extra_args || '';
+
+  const c = s.chat || {};
+  for(const [id, key] of Object.entries(FIELDS))
+    document.getElementById(id).value = c[key] ?? DEFAULTS[key];
+
+  document.getElementById('set-status').textContent = s.can_shard
+    ? (s.model_loaded
+       ? 'A model is loaded. Loading options apply to the next one.'
+       : `llama.cpp ready · version ${s.version || '?'}`)
+    : 'llama.cpp here was built without RPC support, so this machine cannot load models.';
+}
+
+document.getElementById('set-reset').addEventListener('click', () => {
+  for(const [id, key] of Object.entries(FIELDS))
+    document.getElementById(id).value = DEFAULTS[key];
+});
+
+document.getElementById('set-save').addEventListener('click', async () => {
+  const st = document.getElementById('set-status');
+  st.innerHTML = '<span class="spin"></span> saving';
+  const num = id => {
+    const v = document.getElementById(id).value;
+    return v === '' ? null : Number(v);
+  };
+  const body = {
+    name: document.getElementById('set-name').value,
+    model_dir: document.getElementById('set-dir').value,
+    auto_start_worker: document.getElementById('set-auto').checked,
+    system_prompt: document.getElementById('set-sys').value,
+    temperature: num('set-temp'), top_p: num('set-topp'),
+    top_k: num('set-topk'), min_p: num('set-minp'),
+    repeat_penalty: num('set-rep'), max_tokens: num('set-maxtok'),
+    ctx: num('set-ctx'),
+    tensor_split: document.getElementById('set-split').value,
+    extra_args: document.getElementById('set-extra').value};
+  /* Nulls mean "not given", which the server reads as "leave it alone" —
+     so an empty box must not silently wipe a saved value. */
+  Object.keys(body).forEach(k => body[k] === null && delete body[k]);
+  try{
+    const r = await fetch('/api/settings', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const d = await r.json();
+    st.innerHTML = r.ok ? '<span class="ok">Saved.</span>'
+      : `<span class="no">${esc(d.detail)}</span>`;
+    if(r.ok) setTimeout(loadSettings, 1200);
+  }catch(e){ st.innerHTML = `<span class="no">${esc(e)}</span>`; }
+  listModels();
+});
+
+async function loadKey(){
+  const box = document.getElementById('keybox');
+  let d;
+  try{
+    const r = await fetch('/api/key');
+    if(r.status === 403){ box.innerHTML = `<p class="hint">${esc((await r.json()).detail)}</p>`; return; }
+    d = await r.json();
+  }catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
+
+  box.innerHTML = `
+    <div class="keyval" id="keytext">${esc(d.key)}</div>
+    <p class="hint">fingerprint ${esc(d.fingerprint)} ·
+      ${d.peers_online} other machine${d.peers_online === 1 ? '' : 's'} online</p>
+    <div class="row" style="margin-top:.6rem">
+      <button id="keycopy">Copy</button>
+      <span class="hint">Set up another machine with
+        <code>install.py --token &lt;this key&gt;</code></span>
+    </div>
+    <div class="danger">
+      <h4>Issue a new key</h4>
+      <p>Generates a new key and gives it to the ${d.peers_online} machine${d.peers_online === 1 ? '' : 's'}
+        that ${d.peers_online === 1 ? 'is' : 'are'} switched on right now, then changes
+        this one. Anything asleep keeps the old key and drops out until you give it
+        the new one.</p>
+      <button id="keynew">Issue new key</button>
+      <div class="hint" id="keyres"></div>
+    </div>
+    <div class="danger mild">
+      <h4>Join a different cluster</h4>
+      <p>Adopt another cluster's key. This machine leaves the current one.</p>
+      <div class="row"><input id="keyjoin" placeholder="paste the other key"
+        style="flex:1;min-width:200px"><button id="keygo">Join</button></div>
+    </div>`;
+
+  document.getElementById('keycopy').addEventListener('click', async e => {
+    try{ await navigator.clipboard.writeText(d.key); e.target.textContent = 'Copied'; }
+    catch(err){
+      /* The clipboard API needs a secure context, and plain http over the
+         LAN is not one, so fall back to selecting the text. */
+      const rg = document.createRange();
+      rg.selectNode(document.getElementById('keytext'));
+      getSelection().removeAllRanges(); getSelection().addRange(rg);
+      e.target.textContent = 'Selected — press Ctrl+C';
+    }
+    setTimeout(() => e.target.textContent = 'Copy', 2200);
+  });
+
+  document.getElementById('keynew').addEventListener('click', async e => {
+    if(!confirm('Issue a new cluster key?\n\nMachines that are on will be updated '
+      + 'automatically. Anything switched off will drop out until you give it the '
+      + 'new key.')) return;
+    const out = document.getElementById('keyres');
+    e.target.disabled = true; out.innerHTML = '<span class="spin"></span> issuing';
+    try{
+      const r = await fetch('/api/key/new', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({push_to_peers:true})});
+      const j = await r.json();
+      if(!r.ok){ out.innerHTML = `<span class="no">${esc(j.detail)}</span>`;
+                 e.target.disabled = false; return; }
+      const lines = ['<span class="ok">New key issued.</span>'];
+      j.updated.forEach(n => lines.push(`<span class="ok">Updated ${esc(n)}.</span>`));
+      (j.missed || []).forEach(m =>
+        lines.push(`<span class="no">Missed ${esc(m.node)} — ${esc(m.error)}.</span>`));
+      if(j.warning) lines.push(`<span class="no">${esc(j.warning)}</span>`);
+      out.innerHTML = lines.join('<br>');
+      setTimeout(loadKey, 2600);
+    }catch(err){ out.innerHTML = `<span class="no">${esc(err)}</span>`;
+                 e.target.disabled = false; }
+  });
+
+  document.getElementById('keygo').addEventListener('click', async e => {
+    const t = document.getElementById('keyjoin').value.trim();
+    if(!t || !confirm('Leave this cluster and join the one with that key?')) return;
+    e.target.disabled = true;
+    try{
+      const r = await fetch('/api/key', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({token:t})});
+      const j = await r.json();
+      alert(r.ok ? j.note : j.detail);
+    }catch(err){ alert(err); }
+    e.target.disabled = false; loadKey();
+  });
+}
+
+
+/* ---------------- firewall ---------------- */
+async function loadFirewall(){
+  const box = document.getElementById('fwbox');
+  if(!box) return;
+  let f;
+  try{ f = await (await fetch('/api/firewall')).json(); }
+  catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
+
+  const rows = f.ports.map(p => {
+    const state = p.open === true ? '<span class="ok">open</span>'
+                : p.open === false ? '<span class="no">blocked</span>'
+                : '<span class="sub">cannot tell</span>';
+    return `<div class="fwrow"><span>${p.port}/${p.protocol}</span>
+      <span class="sub">${esc(p.label)}</span>${state}</div>`;
+  }).join('');
+
+  let note, action = '';
+  if(f.kind === 'none' || f.inactive){
+    note = `${esc(f.firewall)} — nothing is being blocked here.`;
+  }else if(f.all_open){
+    note = `${esc(f.firewall)} — all three ports are already open.`;
+    action = '<button id="fwfix">Set them again</button>';
+  }else if(f.unknown){
+    note = `${esc(f.firewall)} — cannot tell whether these are open without
+            administrator rights.`;
+    action = '<button id="fwfix" class="primary">Open the ports</button>';
+  }else{
+    note = `${esc(f.firewall)} — some ports are blocked, which is very
+            likely why a machine is missing from the pool.`;
+    action = '<button id="fwfix" class="primary">Open the ports</button>';
+  }
+  if(!f.manageable) action = '';
+
+  box.innerHTML = `<div class="fwlist">${rows}</div>
+    <p class="hint">${note}</p>
+    <div class="row">${action}</div>
+    <div class="hint" id="fwres"></div>`;
+
+  const btn = document.getElementById('fwfix');
+  if(btn) btn.addEventListener('click', async () => {
+    const out = document.getElementById('fwres');
+    btn.disabled = true;
+    out.innerHTML = '<span class="spin"></span> asking for permission';
+    try{
+      const r = await fetch('/api/firewall/open', {method:'POST'});
+      const d = await r.json();
+      /* The prompt appears on the machine running the node, which is not
+         necessarily the machine you are looking at this page on. */
+      out.innerHTML = (d.ok ? '<span class="ok">' : '<span class="no">')
+        + esc(d.message) + '</span>'
+        + (d.commands && d.commands.length && !d.ok
+           ? `<pre class="log">${esc(d.commands.join('\n'))}</pre>` : '');
+      setTimeout(loadFirewall, 4000);
+    }catch(e){ out.innerHTML = `<span class="no">${esc(e)}</span>`; }
+    btn.disabled = false;
+  });
+}
+
+/* ---------------- updates ---------------- */
+async function loadUpdate(){
+  const box = document.getElementById('updbox');
+  if(!box) return;
+  let u;
+  try{ u = await (await fetch('/api/version/check')).json(); }
+  catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
+
+  if(u.error){
+    box.innerHTML = `<p class="hint">Installed version
+      <code>${esc(u.local || '?')}</code>. Could not check for a newer one:
+      ${esc(u.error)}</p>`;
+    return;
+  }
+  if(!u.update_available){
+    box.innerHTML = `<p class="hint">Version <code>${esc(u.local)}</code>,
+      which is the current one.</p>
+      <div class="row"><button id="updcheck">Check again</button></div>`;
+    document.getElementById('updcheck')
+      .addEventListener('click', loadUpdate);
+    return;
+  }
+
+  box.innerHTML = `
+    <p class="hint">You have <code>${esc(u.local)}</code>.
+      Version <code>${esc(u.remote)}</code> is available.</p>
+    <p class="hint">Installing downloads it into <code>tmp/</code>, checks
+      it, keeps a copy of your current version in <code>tmp/backup</code>,
+      and then restarts this node. Your settings, cluster key and
+      downloaded llama.cpp are left alone. This page will come back on its
+      own.</p>
+    <div class="row">
+      <button id="updgo" class="primary">Install ${esc(u.remote)}</button>
+      <a href="${esc(u.repo_url)}" target="_blank" rel="noopener"
+         class="sub" style="color:var(--muted)">see what changed</a>
+    </div>
+    <div class="hint" id="updres"></div>`;
+
+  document.getElementById('updgo').addEventListener('click', async e => {
+    if(!confirm(`Install version ${u.remote}?\n\nThis node will restart. `
+      + `Anything it is running — a loaded model, memory it is lending — `
+      + `will stop.`)) return;
+    const out = document.getElementById('updres');
+    e.target.disabled = true;
+    out.innerHTML = '<span class="spin"></span> downloading and installing';
+    try{
+      const r = await fetch('/api/update/install', {method:'POST'});
+      const d = await r.json();
+      if(!r.ok){
+        out.innerHTML = `<span class="no">${esc(d.detail || r.statusText)}</span>`;
+        e.target.disabled = false; return;
+      }
+      out.innerHTML = `<span class="ok">${esc(d.message)}</span>`;
+      waitForRestart(d.boot_id);
+    }catch(err){
+      out.innerHTML = `<span class="no">${esc(err)}</span>`;
+      e.target.disabled = false;
+    }
+  });
+}
+
+async function waitForRestart(oldBootId){
+  /* Wait for the process itself to change, not for the version number.
+     Installing writes the new version.txt a second or two before the
+     process is replaced, so a page watching the version would reload into
+     a server that is about to exit. Every process picks a fresh boot id at
+     startup, so a different one is proof the restart actually happened. */
+  const out = document.getElementById('updres');
+  for(let i = 0; i < 90; i++){
+    await new Promise(r => setTimeout(r, 1000));
+    try{
+      const h = await (await fetch('/api/health', {cache:'no-store'})).json();
+      if(h.boot_id && h.boot_id !== oldBootId){
+        out.innerHTML = `<span class="ok">Back up on ${esc(h.version)}. `
+          + `Reloading…</span>`;
+        setTimeout(() => location.reload(), 700);
+        return;
+      }
+      out.innerHTML = `<span class="sub"><span class="spin"></span> `
+        + `waiting for the restart (${i + 1}s)</span>`;
+    }catch(e){
+      out.innerHTML = `<span class="sub"><span class="spin"></span> `
+        + `restarting (${i + 1}s)</span>`;
+    }
+  }
+  out.innerHTML = '<span class="no">It has not come back. Check the '
+    + 'terminal on that machine — if the update went wrong, the previous '
+    + 'version is in tmp/backup.</span>';
+}
+
+/* ---------------- boot ---------------- */
+modelBar(); refreshPool(); listModels();
+setInterval(() => {
+  if(document.getElementById('pool').classList.contains('active')) refreshPool();
+}, 5000);
+/* The strip is on every page, so it refreshes regardless of which tab is
+   open. It reads only the broadcast announcements, so this is cheap. */
+setInterval(modelBar, 4000);
+</script>
+</body>
+</html>
