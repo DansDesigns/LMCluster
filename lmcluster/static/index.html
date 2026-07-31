@@ -294,6 +294,9 @@ pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
             placeholder="e.g. take a list of numbers and return the mean, median and standard deviation"></textarea>
         </div>
         <button id="gen" class="primary">Write it</button>
+        <p class="hint">This takes a minute or two on a cluster. You will be
+          moved to the Chat tab to watch the model write it, and the result
+          comes back here.</p>
         <p class="hint" id="gen-status"></p>
       </div>
     </div>
@@ -880,25 +883,95 @@ function exampleInputs(spec){
   return out;
 }
 
+function showTab(name){
+  document.querySelectorAll('nav button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach(sec =>
+    sec.classList.toggle('active', sec.id === name));
+}
+
 document.getElementById('gen').addEventListener('click', async () => {
   const desc = document.getElementById('gen-desc').value.trim();
   if(!desc) return;
   const st = document.getElementById('gen-status');
-  st.innerHTML = '<span class="spin"></span> the model is writing it — this may take a few minutes';
+  st.innerHTML = '<span class="spin"></span> writing — watch it on the Chat tab';
+
+  /* Move to the chat view and let the writing happen there. On a cluster
+     this takes a minute or two, and a spinner for that long says nothing.
+     Seeing the model work means that when the result is wrong you have
+     already watched where it went wrong. */
+  showTab('chat');
+  chatId = null;
+  history = [
+    {role:'user', content:`Write a skill that does the following:\n\n${desc}`},
+    {role:'assistant', content:'', stats:'writing…'}
+  ];
+  const reply = history[1];
+  renderMsgs();
+  const chatStatus = document.getElementById('chat-status');
+  chatStatus.innerHTML = '<span class="spin"></span> writing a skill';
+
+  let result = null;
   try{
     const r = await fetch('/api/skills/generate', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({description:desc})});
-    const d = await r.json();
-    if(!r.ok){ st.innerHTML = `<span class="no">${esc(d.detail || r.statusText)}</span>`; return; }
-    document.getElementById('skill-src').value = d.source;
-    document.getElementById('skill-id').value =
-      (d.name || 'new-skill').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-    document.getElementById('editor-title').textContent = d.name || 'New skill';
-    st.innerHTML = d.valid
-      ? `<span class="ok">Written in ${d.seconds}s and it compiles. Read it, then save.</span>`
-      : `<span class="no">Written in ${d.seconds}s but it has problems: ${esc(d.problems.join('; '))}</span>`;
-  }catch(e){ st.innerHTML = `<span class="no">${esc(e)}</span>`; }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for(const line of lines){
+        if(!line.trim()) continue;
+        let c; try{ c = JSON.parse(line); }catch(e){ continue; }
+        if(c.chat_id) chatId = c.chat_id;
+        if(c.delta){ reply.content += c.delta; renderMsgs(); }
+        if(c.done){
+          if(c.error){ reply.stats = ''; reply.content += '\n\n' + c.error; }
+          else result = c;
+          renderMsgs();
+        }
+      }
+    }
+  }catch(e){
+    reply.content += `\n\nRequest failed: ${e}`;
+    renderMsgs();
+  }
+  chatStatus.textContent = '';
+  listChats();
+
+  if(!result){
+    reply.stats = '';
+    st.innerHTML = '<span class="no">nothing usable came back</span>';
+    renderMsgs();
+    return;
+  }
+
+  const bits = [`${result.seconds}s`];
+  if(result.attempts > 1) bits.push(`${result.attempts} attempts`);
+  reply.stats = bits.join(' · ');
+  renderMsgs();
+
+  /* Put the extracted file in the editor either way. Even a file that
+     will not compile is easier to fix by hand than to ask for again. */
+  document.getElementById('skill-src').value = result.source;
+  document.getElementById('skill-id').value =
+    (result.name || 'new-skill').toLowerCase()
+      .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  document.getElementById('editor-title').textContent = result.name || 'New skill';
+  document.getElementById('skill-in').value =
+    JSON.stringify(exampleInputs(result.inputs));
+
+  st.innerHTML = result.valid
+    ? `<span class="ok">Written in ${result.seconds}s and it compiles.
+       It is in the editor — read it, then save.</span>`
+    : `<span class="no">Written in ${result.seconds}s but it will not
+       compile: ${esc(result.problems.join('; '))}. It is in the editor
+       so you can fix it.</span>`;
 });
 
 document.getElementById('skill-save').addEventListener('click', async () => {
@@ -1171,9 +1244,12 @@ async function loadUpdate(){
   catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
 
   if(u.error){
-    box.innerHTML = `<p class="hint">Installed version
-      <code>${esc(u.local || '?')}</code>. Could not check for a newer one:
-      ${esc(u.error)}</p>`;
+    box.innerHTML = `<p class="hint">${u.local
+      ? `Installed version <code>${esc(u.local)}</code>. ` : ''}
+      Update checking is unavailable: ${esc(u.error)}</p>
+      <div class="row"><button id="updcheck">Check again</button></div>`;
+    const b = document.getElementById('updcheck');
+    if(b) b.addEventListener('click', loadUpdate);
     return;
   }
   if(!u.update_available){

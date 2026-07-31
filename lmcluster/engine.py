@@ -13,6 +13,7 @@ thin client over llama-server's OpenAI-compatible endpoints.
 """
 
 import json
+import re
 import time
 
 import httpx
@@ -225,45 +226,86 @@ Rules:
 - Handle missing or malformed inputs by returning an error field rather \
 than raising.
 - Keep it short and readable.
+- Plain ASCII punctuation only. No curly quotes, no em dashes, no ellipsis \
+characters. Use ' and " and - and ...
 
-Reply with the Python file and nothing else. No explanation, no markdown \
-fences."""
+Reply with the Python file and nothing else. No explanation before it, no \
+commentary after it, no markdown fences."""
 
 
-def strip_fences(text: str) -> str:
-    """Remove markdown code fences a model may have added anyway.
+# Characters models reach for when writing prose, which are not valid
+# Python outside a string. An em dash in the first column stops the file
+# compiling with "invalid character (U+2014)", and a curly quote in place
+# of an apostrophe does the same. Substituting the plain equivalents is
+# safe: in code they are always mistakes, and in a docstring the plain
+# version reads no worse.
+TYPOGRAPHIC = {
+    "\u2014": "-",   # em dash
+    "\u2013": "-",   # en dash
+    "\u2212": "-",   # minus sign
+    "\u2018": "'",   # left single quote
+    "\u2019": "'",   # right single quote
+    "\u201c": '"',   # left double quote
+    "\u201d": '"',   # right double quote
+    "\u00a0": " ",   # non-breaking space
+    "\u2026": "...",  # ellipsis
+    "\u00d7": "*",   # multiplication sign
+    "\u2192": "->",  # arrow
+}
 
-    The system prompt asks for bare Python, but models add fences often
-    enough that silently handling it is kinder than failing validation and
-    making the user retry.
+
+def tidy_characters(text: str) -> str:
+    for wrong, right in TYPOGRAPHIC.items():
+        text = text.replace(wrong, right)
+    return text
+
+
+_FENCED = re.compile(r"```(?:python|py)?[ \t]*\r?\n(.*?)```", re.S)
+_FENCE_OPEN = re.compile(r"```(?:python|py)?[ \t]*\r?\n(.*)", re.S)
+_CODE_START = ('"""', "'''", "import ", "from ", "def ", "class ", "#!")
+
+
+def extract_code(text: str) -> str:
+    """Pull the Python out of a model's reply.
+
+    The instructions ask for bare Python and nothing else. Models comply
+    most of the time and then, occasionally, open with "Here is the skill
+    you asked for:" or a stray dash, wrap the code in a fence, and sign off
+    with "Hope that helps!". The previous version only removed a fence
+    sitting at the very start of the reply, so any of that left the prose
+    in place and the file would not compile — which is exactly how a
+    generation that took eighty-six seconds came back reporting a syntax
+    error on line one.
     """
-    text = text.strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    lines = lines[1:]  # drop the opening fence and any language tag
-    if lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
+    text = tidy_characters(text.strip())
+
+    # A fenced block anywhere in the reply is the clearest signal.
+    match = _FENCED.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # A fence that was opened and never closed, which happens when a reply
+    # is cut short.
+    match = _FENCE_OPEN.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # No fence: drop everything before the first line that could plausibly
+    # begin a Python file.
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(_CODE_START):
+            return "\n".join(lines[i:]).strip()
+
+    return text
 
 
-async def generate_skill(engine: Engine, description: str,
-                         temperature: float = 0.3) -> dict:
-    """Ask the loaded model to write a skill, then check it compiles.
+# Kept under the old name because it is the obvious thing to reach for.
+strip_fences = extract_code
 
-    Returns the source for review rather than saving it. Nothing written by
-    a model should land on disk as executable code without someone reading
-    it first, and skills are not sandboxed.
-    """
+
+def describe_result(source: str, seconds: float, attempts: int) -> dict:
     from . import skills
-
-    prompt = f"Write a skill that does the following:\n\n{description}"
-    # Deliberately overriding the saved settings here. Code wants a low
-    # temperature whatever the conversation preference is, and the user's
-    # own system prompt would be actively unhelpful.
-    result = await engine.generate(prompt, system=SKILL_SYSTEM,
-                                   temperature=temperature)
-    source = strip_fences(result["text"])
     valid, problems = skills.validate(source)
     meta = skills.parse_metadata(source)
     return {
@@ -274,5 +316,68 @@ async def generate_skill(engine: Engine, description: str,
         "description": meta.get("description"),
         "inputs": meta.get("inputs"),
         "outputs": meta.get("outputs"),
-        "seconds": result["seconds"],
+        "seconds": round(seconds, 1),
+        "attempts": attempts,
     }
+
+
+def retry_prompt(description: str, source: str, problems: list) -> str:
+    """Hand the model its own mistake rather than handing it to the person.
+
+    Waiting a minute and a half for a skill and being told it will not
+    compile is a poor result when the fault is usually a missing function
+    or a stray character, and the model can fix either if simply told what
+    it did.
+    """
+    faults = "\n".join(f"- {p}" for p in problems)
+    return (f"That did not work. The file you produced has these "
+            f"problems:\n\n{faults}\n\nHere is what you sent:\n\n"
+            f"{source[:2000]}\n\nWrite the whole file again, corrected. "
+            f"The original request was:\n\n{description}")
+
+
+async def generate_skill(engine: Engine, description: str,
+                         temperature: float = 0.3,
+                         on_delta=None, retries: int = 1) -> dict:
+    """Ask the loaded model to write a skill, then check it compiles.
+
+    Returns the source for review rather than saving it. Nothing a model
+    writes should land on disk as runnable code without a person reading it
+    first, and skills are not sandboxed.
+
+    If `on_delta` is given it is called with each fragment as it arrives, so
+    the caller can show the model working rather than a spinner. A model
+    spread across several machines can take a couple of minutes over this,
+    and watching it is the more useful arrangement: when the result is
+    wrong, you have already seen where it went wrong rather than being
+    handed a verdict about a file you never saw being written.
+    """
+    started = time.time()
+    prompt = f"Write a skill that does the following:\n\n{description}"
+    source = ""
+
+    for attempt in range(retries + 1):
+        collected = []
+        # Deliberately ignoring the saved chat settings. Code wants a low
+        # temperature whatever the conversation preference is, and the
+        # person's own system prompt would be actively unhelpful here.
+        async for chunk in engine.stream(prompt, system=SKILL_SYSTEM,
+                                         temperature=temperature):
+            if chunk.get("delta"):
+                collected.append(chunk["delta"])
+                if on_delta:
+                    await on_delta(chunk["delta"])
+
+        source = extract_code("".join(collected))
+        result = describe_result(source, time.time() - started, attempt + 1)
+        if result["valid"] or attempt == retries:
+            return result
+
+        problems = [p for p in result["problems"]
+                    if not p.startswith("warning:")]
+        if on_delta:
+            await on_delta(f"\n\n--- that will not compile: "
+                           f"{'; '.join(problems)}\n--- asking again ---\n\n")
+        prompt = retry_prompt(description, source, problems)
+
+    return describe_result(source, time.time() - started, retries + 1)

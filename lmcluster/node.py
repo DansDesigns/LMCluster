@@ -822,20 +822,64 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/api/skills/generate", dependencies=admin_guard)
     async def skill_generate(req: SkillGenerate):
-        """Have the loaded model write a skill from a description.
+        """Have the loaded model write a skill, streamed as it works.
 
-        The result comes back for review rather than being saved. Code
-        written by a model should not land on disk and become runnable
-        without a person reading it first, particularly as skills are not
-        sandboxed.
+        Streamed rather than returned in one piece because this takes a
+        while — a minute or two on a cluster is normal — and a spinner for
+        that long tells you nothing. Watching the model work is more
+        useful than watching a spinner: when the result is wrong you have
+        already seen where it went wrong, rather than being handed a
+        verdict about a file you never saw being written.
+
+        The reply is saved as a conversation like any other, so it can be
+        read again afterwards.
         """
-        try:
-            return await engine_mod.generate_skill(
-                node.engine, req.description, temperature=req.temperature)
-        except engine_mod.NoModelLoaded as e:
-            raise HTTPException(400, str(e))
-        except httpx.HTTPError as e:
-            raise HTTPException(502, f"the model did not answer: {e}")
+        chat_id = node.store.new_chat(f"Write a skill: {req.description}")
+        node.store.add_message(chat_id, "user",
+                               f"Write a skill that does the following:\n\n"
+                               f"{req.description}")
+
+        async def body():
+            yield json.dumps({"chat_id": chat_id}) + "\n"
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def on_delta(text):
+                await queue.put(text)
+
+            async def work():
+                try:
+                    return await engine_mod.generate_skill(
+                        node.engine, req.description,
+                        temperature=req.temperature, on_delta=on_delta)
+                finally:
+                    await queue.put(None)
+
+            task = asyncio.create_task(work())
+            collected = []
+            while True:
+                piece = await queue.get()
+                if piece is None:
+                    break
+                collected.append(piece)
+                yield json.dumps({"delta": piece}) + "\n"
+
+            try:
+                result = await task
+            except engine_mod.NoModelLoaded as e:
+                yield json.dumps({"done": True, "error": str(e)}) + "\n"
+                return
+            except httpx.HTTPError as e:
+                yield json.dumps({"done": True,
+                                  "error": f"the model stopped "
+                                           f"answering: {e}"}) + "\n"
+                return
+
+            if collected:
+                node.store.add_message(chat_id, "assistant",
+                                       "".join(collected).strip())
+            yield json.dumps({"done": True, **result}) + "\n"
+
+        return StreamingResponse(body(), media_type="application/x-ndjson")
 
     # -- the cluster key -------------------------------------------------
     # Restricted to this machine rather than to the key itself. Guarding

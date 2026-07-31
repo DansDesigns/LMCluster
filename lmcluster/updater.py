@@ -15,11 +15,17 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def local_version() -> str | None:
-    path = os.path.join(_ROOT, "version.txt")
+    """This installation's version, if it has one.
+
+    Read from version.txt beside the code. A missing file is not an error:
+    a checkout that has not been tagged simply has no version, and the
+    update check reports that it cannot compare rather than inventing a
+    number.
+    """
     try:
-        with open(path, encoding="utf-8") as f:
-            v = f.read().strip()
-            return v or None
+        with open(os.path.join(_ROOT, "version.txt"), encoding="utf-8") as f:
+            text = f.read().strip()
+            return text or None
     except OSError:
         return None
 
@@ -43,7 +49,7 @@ async def check() -> dict:
         "error": None,
     }
     if local is None:
-        result["error"] = "local version.txt missing or empty"
+        result["error"] = "this installation has no version.txt, so there is nothing to compare against. Add one to the repository and to this folder if you want update checking."
         return result
 
     last_err = None
