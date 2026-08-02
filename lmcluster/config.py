@@ -51,6 +51,7 @@ DEFAULTS = {
         "ctx": 4096,                # context window to load models with
         "tensor_split": "",         # how to weight layers across machines
         "n_gpu_layers": "",         # blank = let llama.cpp work it out
+        "reserve_gb": 2.0,          # memory kept back for everything else
         "extra_args": "",           # anything else to pass to llama-server
     },
 }

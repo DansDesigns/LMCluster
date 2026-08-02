@@ -83,6 +83,14 @@ code{font-family:var(--mono);font-size:.78rem;color:var(--amber);word-break:brea
 .seg.model{background:var(--amber);color:var(--ink)}
 .seg.live{background:var(--teal);color:var(--ink)}
 .seg.spare{background:var(--amber-dim);color:var(--text)}
+.loadbar{height:10px;border:1px solid var(--line);border-radius:5px;
+  overflow:hidden;background:var(--ink);margin:.7rem 0 .35rem}
+.loadfill{height:100%;background:var(--amber);transition:width .6s ease}
+.loadfill.indeterminate{width:35%;background:linear-gradient(90deg,
+  transparent,var(--amber),transparent);animation:slide 1.6s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+@media(prefers-reduced-motion:reduce){
+  .loadfill.indeterminate{animation-duration:4s}}
 .seg.loading{background:repeating-linear-gradient(45deg,var(--amber),
   var(--amber) 8px,var(--amber-dim) 8px,var(--amber-dim) 16px);color:var(--ink)}
 .legend{display:flex;gap:1.1rem;font-family:var(--mono);font-size:.65rem;
@@ -380,6 +388,15 @@ pre.log{background:var(--ink);border:1px solid var(--line);border-radius:4px;
           <p class="hint">How much conversation the model can see at once.
             Larger costs memory on every machine, so it comes out of what is
             available for the model itself.</p>
+        </div>
+        <div class="field">
+          <label for="set-reserve">Memory kept back on this machine, in GB</label>
+          <input id="set-reserve" type="number" min="0" max="256" step="0.5">
+          <p class="hint">Held back from the pool for the operating system
+            and anything else this machine is doing. Two gigabytes suits a
+            machine doing nothing else; raise it on one you are also using,
+            because a model that takes everything will make the whole
+            machine crawl. Each machine has its own figure.</p>
         </div>
         <div class="field">
           <label for="set-ngl">Layers on devices</label>
@@ -822,11 +839,35 @@ async function refreshPool(){
        question anyone has at that point is whether it is progressing or
        stuck — which the last log line answers and a counter does not. */
     const secs = d.model.loading_for;
+    const frac = d.model.progress_fraction;
+    const elapsed = secs
+      ? (secs > 90 ? Math.round(secs / 60) + ' min' : secs + 's') : null;
+
+    /* llama.cpp reports its loading progress by printing dots, one per
+       percent, and that is the only measure it offers — the health
+       endpoint says nothing beyond "loading". So the bar is honest about
+       being approximate, and when there is nothing to count it moves
+       without claiming a figure rather than inventing one. */
+    let bar;
+    if(frac !== null && frac !== undefined && frac > 0){
+      const pct = Math.round(frac * 100);
+      const left = (secs && frac > 0.08)
+        ? Math.round(secs / frac - secs) : null;
+      bar = `<div class="loadbar"><div class="loadfill"
+               style="width:${pct}%"></div></div>
+             <p class="hint">about ${pct}%${elapsed ? ` · ${elapsed} so far` : ''}${
+               left && left > 20 ? ` · roughly ${left > 90
+                 ? Math.round(left / 60) + ' min' : left + 's'} left` : ''}</p>`;
+    }else{
+      bar = `<div class="loadbar"><div class="loadfill indeterminate"></div></div>
+             <p class="hint">reading the model in${elapsed ? ` · ${elapsed} so far` : ''}
+               · no progress figure yet</p>`;
+    }
+
     document.getElementById('verdict').innerHTML =
-      `<div class="verdict solo"><span class="spin"></span>
-         Loading${secs ? ` — ${secs > 90 ? Math.round(secs / 60) + ' min' : secs + 's'} so far` : ''}.
-         A large model spread over several machines takes a while to read
-         in; several minutes is normal.</div>` +
+      `<div class="verdict solo">Loading. A large model spread over several
+         machines takes a while to read in; several minutes is normal.
+         ${bar}</div>` +
       (d.model.progress
         ? `<pre class="log" style="max-height:none">${esc(d.model.progress)}</pre>`
         : '');
@@ -1240,6 +1281,8 @@ async function loadSettings(){
   document.getElementById('set-ctx').value = L.ctx ?? 4096;
   document.getElementById('set-split').value = L.tensor_split || '';
   document.getElementById('set-ngl').value = L.n_gpu_layers || '';
+  document.getElementById('set-reserve').value =
+    L.reserve_gb === undefined ? 2 : L.reserve_gb;
   document.getElementById('set-extra').value = L.extra_args || '';
 
   const c = s.chat || {};
@@ -1276,6 +1319,7 @@ document.getElementById('set-save').addEventListener('click', async () => {
     ctx: num('set-ctx'),
     tensor_split: document.getElementById('set-split').value,
     n_gpu_layers: document.getElementById('set-ngl').value,
+    reserve_gb: num('set-reserve'),
     extra_args: document.getElementById('set-extra').value};
   /* Nulls mean "not given", which the server reads as "leave it alone" —
      so an empty box must not silently wipe a saved value. */

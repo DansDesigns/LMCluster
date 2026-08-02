@@ -78,6 +78,7 @@ class SettingsUpdate(BaseModel):
     tensor_split: str | None = None
     extra_args: str | None = None
     n_gpu_layers: str | None = None
+    reserve_gb: float | None = None
 
 
 class KeyRotate(BaseModel):
@@ -162,6 +163,12 @@ class Node:
             "can_use_gpu": bool([b for b in backends if b != "cpu"]),
             "link": {"type": link.get("type"), "band": link.get("band"),
                      "speed_mbps": link.get("speed_mbps")},
+            # How much this machine keeps for itself. Advertised so the
+            # planner honours each machine's own choice rather than
+            # applying one figure to a dedicated desktop and a laptop
+            # somebody is also using.
+            "reserve": int(float(self.cfg.shard.get("reserve_gb", 2.0))
+                           * 1024 ** 3),
             "ram_free": hw["ram_free"],
             "ram_total": hw["ram_total"],
             "vram_free": hw["vram_free"],
@@ -488,6 +495,7 @@ def create_app(config: Config) -> FastAPI:
                     "tensor_split": config.shard.get("tensor_split", ""),
                     "extra_args": config.shard.get("extra_args", ""),
                     "n_gpu_layers": config.shard.get("n_gpu_layers", ""),
+                    "reserve_gb": config.shard.get("reserve_gb", 2.0),
                 },
                 "model_loaded": node.master.running}
 
@@ -517,6 +525,9 @@ def create_app(config: Config) -> FastAPI:
             config.shard["ctx"] = max(512, int(upd.ctx))
         if upd.extra_args is not None:
             config.shard["extra_args"] = upd.extra_args.strip()
+        if upd.reserve_gb is not None:
+            reserve = max(0.0, min(float(upd.reserve_gb), 256.0))
+            config.shard["reserve_gb"] = round(reserve, 1)
         if upd.n_gpu_layers is not None:
             value = str(upd.n_gpu_layers).strip()
             if value and not value.isdigit():
@@ -702,6 +713,7 @@ def create_app(config: Config) -> FastAPI:
                 "id": config.node_id, "name": config.name,
                 "ram_free": local.get("ram_free"),
                 "ram_total": local.get("ram_total"),
+                "reserve": local.get("reserve"),
                 "vram_free": local.get("vram_free"),
                 "gpu": local.get("gpu"),
                 "gpu_name": local.get("gpu_name"),

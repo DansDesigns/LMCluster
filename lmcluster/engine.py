@@ -150,6 +150,7 @@ class Engine:
             "state": state,
             "loading_for": self.master.status().get("uptime"),
             "progress": self.master.progress(),
+            "progress_fraction": self.master.progress_fraction(),
             "model": model or os.path.basename(
                 plan.get("model_path", "").replace("\\", "/")),
             "nodes": len(plan.get("workers", [])) + 1,

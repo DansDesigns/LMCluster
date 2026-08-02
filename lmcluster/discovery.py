@@ -50,6 +50,7 @@ class PeerRegistry:
                 "devices": caps.get("devices", []),
                 "link": caps.get("link") or {},
                 "rpc_port": caps.get("rpc_port"),
+                "reserve": caps.get("reserve"),
                 "ram_free": caps.get("ram_free"),
                 "ram_total": caps.get("ram_total"),
                 "vram_free": caps.get("vram_free"),

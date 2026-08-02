@@ -32,9 +32,28 @@ import time
 DEFAULT_RPC_PORT = 50052
 DEFAULT_MASTER_PORT = 8080
 
-# The master reserves this much of a node's free RAM for the OS, KV cache
-# and its own working set before offering the rest to the plan.
-HEADROOM_BYTES = 2 * 1024 ** 3
+# How much of a machine's free memory is held back by default, for the
+# operating system, the KV cache and whatever else that machine is doing.
+# Each machine can set its own, since what is sensible on a dedicated box
+# with 64 GB is not sensible on a laptop somebody is also using.
+DEFAULT_RESERVE_BYTES = 2 * 1024 ** 3
+
+
+def usable_memory(node: dict) -> int:
+    """How much of a machine's memory the cluster may actually plan on.
+
+    Its free memory, less whatever that machine has asked to keep back.
+    Graphics memory counts as well, except on unified-memory machines where
+    it is the same memory already counted once.
+    """
+    ram = node.get("ram_free") or 0
+    vram = node.get("vram_free") or 0
+    if node.get("gpu_backend") == "metal" or node.get("gpu") == "metal":
+        vram = 0
+    reserve = node.get("reserve")
+    if reserve is None:
+        reserve = DEFAULT_RESERVE_BYTES
+    return max(0, ram + vram - int(reserve))
 
 
 class RpcError(RuntimeError):
@@ -632,6 +651,35 @@ class ShardMaster:
                  "init_tokenizer", "llama_context", "kv cache",
                  "compute buffer", "graph nodes", "warming up")
 
+    def progress_fraction(self) -> float | None:
+        """Roughly how far through loading llama.cpp is, from 0 to 1.
+
+        llama.cpp reports its loading progress by printing dots — one per
+        percent of tensors read — which is the only progress it offers. The
+        health endpoint says nothing beyond "loading", and there is no
+        percentage anywhere in the API.
+
+        So this counts dots. It is approximate by nature: a build that
+        prints them differently, or a load that fails before it starts
+        printing, gives nothing rather than a wrong number. None means "no
+        idea", and the page then shows an indeterminate bar rather than
+        inventing a figure.
+        """
+        dots = 0
+        started = False
+        for line in self.log:
+            if "load_tensors:" in line and "loading model tensors" in line:
+                started = True
+                continue
+            stripped = line.strip()
+            if stripped and set(stripped) == {"."}:
+                dots += len(stripped)
+        if not started and not dots:
+            return None
+        if not dots:
+            return 0.0
+        return min(1.0, dots / 100.0)
+
     def progress(self) -> str | None:
         """The most recent line that says something about loading.
 
@@ -694,6 +742,7 @@ class ShardMaster:
                        if self.started_at and self.running else None),
             "plan": self.plan,
             "progress": self.progress(),
+            "progress_fraction": self.progress_fraction(),
             "last_failure": self.last_failure,
             "url": f"http://127.0.0.1:{self.port}" if self.running else None,
         }
@@ -938,13 +987,7 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
     here lets the dashboard show the arithmetic instead of asking anyone to
     take the total on trust.
     """
-    def usable(node: dict) -> int:
-        ram = node.get("ram_free") or 0
-        vram = node.get("vram_free") or 0
-        if node.get("gpu_backend") == "metal":
-            vram = 0  # unified memory: already counted as RAM
-        return max(0, ram + vram - HEADROOM_BYTES)
-
+    usable = usable_memory
     live = usable(local)
     potential = live
     ready, fixable, blocked = [], [], []
@@ -953,7 +996,9 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
         "self": True,
         "bytes": usable(local),
         "counted": True,
-        "why": "counted because a model loaded here is held here",
+        "why": ("nothing to give: the reserve is larger than its free memory"
+                if usable(local) <= 0 else
+                "counted because a model loaded here is held here"),
     }]
 
     for w in workers:
@@ -976,7 +1021,9 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
             "self": False,
             "bytes": share,
             "counted": counted,
-            "why": (("holding part of the model" if w["reason"] == "serving"
+            "why": (("nothing to give: its reserve is larger than its free "
+                     "memory" if share <= 0 else
+                     "holding part of the model" if w["reason"] == "serving"
                      else "lending its memory") if counted
                     else f"not counted: {w.get('label', 'unavailable').lower()}"),
         })
@@ -1055,14 +1102,7 @@ def plan_shard(model_path: str, local: dict, peers: list[dict],
     if size is None:
         raise RpcError(f"cannot size model at {model_path!r} — does it exist?")
 
-    def usable(node: dict) -> int:
-        ram = node.get("ram_free") or 0
-        vram = node.get("vram_free") or 0
-        # Unified-memory Macs would double-count RAM as VRAM.
-        if node.get("gpu_backend") == "metal":
-            vram = 0
-        return max(0, ram + vram - HEADROOM_BYTES)
-
+    usable = usable_memory
     local_usable = usable(local)
     candidates = sorted(
         [p for p in peers if p.get("rpc_available")],
