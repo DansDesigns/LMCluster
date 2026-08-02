@@ -482,8 +482,13 @@ def get_llamacpp(args) -> dict:
         say("    llama.cpp cannot be replaced while its files are open.")
         say("    Stop the LMCluster node on this machine first — close its")
         say("    window, or press Leave the pool on its dashboard.")
+        say("")
+        say("    If you carry on, llama.cpp will NOT be replaced — you will")
+        say("    keep whatever build is there now.")
         if not ask("  Try anyway?", default=False, assume_yes=False):
-            raise Abort("stopped so you can shut the node down first")
+            raise Abort(
+                "stopped so you can shut the node down first. Nothing has "
+                "been changed; run this again once it is closed.")
 
     try:
         found = prebuilt.fetch(LLAMA_BIN, gpu_backend=backend, say=say)
@@ -503,6 +508,24 @@ def get_llamacpp(args) -> dict:
     say(f"  ✓ llama.cpp {found['release']} ready, no compiler needed")
     say(f"    RPC server:   {found['rpc']}")
     say(f"    llama-server: {found['server']}")
+
+    # Confirm what actually arrived rather than trusting the archive name.
+    # Asking for a GPU build and quietly ending up with a CPU one is the
+    # kind of thing that is only noticed days later, when the machine keeps
+    # telling everyone else it has no graphics support.
+    from lmcluster import rpc as rpc_mod
+    got = rpc_mod.build_backends(found["rpc"])
+    accel = [b for b in got if b != "cpu"]
+    if backend in ("cpu", "none"):
+        say("    this is a CPU build, as asked")
+    elif backend in got:
+        say(f"    confirmed: {rpc_mod.describe_build(found['rpc'])}")
+    else:
+        say(f"  ⚠ you asked for {backend}, but what downloaded is a "
+            f"{rpc_mod.describe_build(found['rpc']).lower()}"
+            + (f" ({', '.join(accel)})" if accel else "") + ".")
+        say(f"    There may be no {backend} build published for this "
+            f"platform in that release.")
     return {"rpc": found["rpc"], "server": found["server"]}
 
 

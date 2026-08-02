@@ -83,11 +83,18 @@ class RpcWorker:
     """
 
     def __init__(self, binary: str, port: int = DEFAULT_RPC_PORT,
-                 host: str = "0.0.0.0", use_cache: bool = True):
+                 host: str = "0.0.0.0", use_cache: bool = True,
+                 use_gpu: bool = True):
         self.binary = binary
         self.port = int(port)
         self.host = host
         self.use_cache = use_cache
+        # Whether to offer this machine's graphics memory as well as its
+        # system memory. Switchable at runtime rather than needing a
+        # different build, because the choice is not obvious: a graphics
+        # card is faster but holds far less, so on a large model spread
+        # across machines the same card can be the reason it will not fit.
+        self.use_gpu = use_gpu
         self.proc: subprocess.Popen | None = None
         self.started_at: float | None = None
         self.last_error: str | None = None
@@ -144,7 +151,32 @@ class RpcWorker:
         if self.use_cache and ("-c" in flags or "--cache" in flags):
             cmd += ["-c"]
 
+        # Offering only the CPU means offering system memory only. The RPC
+        # server exposes every device it finds unless told otherwise, and
+        # --device is the documented way to narrow that.
+        if not self.use_gpu and self.accelerator_backends and (
+                "--device" in flags or "-d" in flags):
+            cmd += ["--device", "CPU"]
+
         return cmd
+
+    @property
+    def accelerator_backends(self) -> list:
+        return [b for b in build_backends(self.binary) if b != "cpu"]
+
+    def environment(self) -> dict:
+        """Environment for the worker process.
+
+        A fallback for builds too old to have --device: every ggml backend
+        honours a visible-devices variable, and an empty one leaves nothing
+        visible. Harmless to set when --device is doing the work anyway.
+        """
+        env = dict(os.environ)
+        if not self.use_gpu:
+            for var in ("GGML_VK_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
+                        "HIP_VISIBLE_DEVICES", "GGML_SYCL_VISIBLE_DEVICES"):
+                env[var] = ""
+        return env
 
     def start(self) -> dict:
         if self.running:
@@ -164,7 +196,7 @@ class RpcWorker:
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True, bufsize=1, env=self.environment())
         except OSError as e:
             self.last_error = str(e)
             raise RpcError(f"could not start the RPC server: {e}") from e
@@ -264,6 +296,8 @@ class RpcWorker:
             "command": " ".join(self.command) if self.command else None,
             "devices": self.devices,
             "accelerators": len(self.accelerators),
+            "use_gpu": self.use_gpu,
+            "can_use_gpu": bool(self.accelerator_backends),
             "banner": self.banner[:20],
             "error": self.last_error,
         }
@@ -287,7 +321,29 @@ class ShardMaster:
         self.log: list[str] = []
         self.started_at: float | None = None
         self.last_failure: str | None = None
+        self.use_gpu: bool = True
         self._help: str | None = None
+
+    def environment(self) -> dict:
+        """Environment for llama-server.
+
+        When this machine is set to lend system memory only, its own
+        graphics device is hidden here with the visible-devices variables
+        rather than with --device.
+
+        The distinction matters. --device names the complete set of devices
+        llama.cpp may use, and the RPC workers are in that set — so
+        restricting it to CPU would exclude every other machine in the
+        cluster and quietly turn a shared model into a local one. The
+        environment variables only affect which local graphics devices the
+        backends find, and leave the RPC devices alone.
+        """
+        env = dict(os.environ)
+        if not self.use_gpu:
+            for var in ("GGML_VK_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
+                        "HIP_VISIBLE_DEVICES", "GGML_SYCL_VISIBLE_DEVICES"):
+                env[var] = ""
+        return env
 
     def version(self) -> str | None:
         """Which llama.cpp build this is.
@@ -303,7 +359,7 @@ class ShardMaster:
             return match.group(1)
         try:
             r = subprocess.run([self.binary, "--version"],
-                               capture_output=True, text=True, timeout=15,
+                               capture_output=True, text=True, timeout=8,
                                check=False)
             out = ((r.stdout or "") + (r.stderr or "")).strip()
             match = re.search(r"version:\s*(\S+)", out)
@@ -327,9 +383,15 @@ class ShardMaster:
         if self._help is not None:
             return self._help
         try:
+            # Short, because this is on the path of an ordinary page load.
+            # A binary that does not answer promptly is treated as one that
+            # said nothing, which costs a version number rather than
+            # holding the dashboard open waiting.
             r = subprocess.run([self.binary, "--help"], capture_output=True,
-                               text=True, timeout=20, check=False)
+                               text=True, timeout=8, check=False)
             self._help = (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired:
+            self._help = ""
         except (OSError, subprocess.SubprocessError):
             self._help = ""
         return self._help
@@ -411,7 +473,7 @@ class ShardMaster:
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
+                text=True, bufsize=1, env=self.environment())
         except OSError as e:
             raise RpcError(f"could not start llama-server: {e}") from e
 
@@ -641,6 +703,58 @@ PROBE_DIAGNOSIS = {
         "On that machine, run: install.py --with-rpc",
         False),
 }
+
+
+# Which ggml library means which backend. Checking for these beside the
+# binary is the one wholly reliable way to know what a build supports: it
+# needs nothing run and nothing parsed, and it is true whether or not the
+# machine happens to have a suitable device in it.
+_BACKEND_LIBS = {
+    "vulkan": ("ggml-vulkan",),
+    "cuda": ("ggml-cuda",),
+    "rocm": ("ggml-hip", "ggml-rocm"),
+    "metal": ("ggml-metal",),
+    "sycl": ("ggml-sycl",),
+    "opencl": ("ggml-opencl",),
+}
+
+
+def build_backends(binary: str) -> list[str]:
+    """Which accelerators this llama.cpp build was compiled for.
+
+    Read from the library files sitting beside the binary. The alternative
+    — starting the RPC server and reading what it says about itself — only
+    works if it is running, only reports devices actually present, and
+    depends on the exact wording of its output. This does not: a build with
+    ggml-vulkan beside it is a Vulkan build, full stop, and that is the
+    question being asked when somebody reinstalls with --gpu vulkan and
+    wants to know whether it took.
+    """
+    if not binary or not os.path.exists(binary):
+        return []
+    folder = os.path.dirname(os.path.abspath(binary))
+    try:
+        names = [n.lower() for n in os.listdir(folder)]
+    except OSError:
+        return []
+
+    found = []
+    for backend, stems in _BACKEND_LIBS.items():
+        if any(n.startswith(stem) for stem in stems for n in names):
+            found.append(backend)
+    if any(n.startswith("ggml-cpu") or n.startswith("libggml-cpu")
+           for n in names):
+        found.append("cpu")
+    return found
+
+
+def describe_build(binary: str) -> str:
+    """A short phrase for what this build can use, for the dashboard."""
+    backends = [b for b in build_backends(binary) if b != "cpu"]
+    if not backends:
+        return "CPU build"
+    return " and ".join(b.upper() if b in ("cuda", "rocm") else b.title()
+                        for b in backends) + " build"
 
 
 async def probe_worker(host: str, port: int,

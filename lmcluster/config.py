@@ -44,6 +44,7 @@ DEFAULTS = {
         "rpc_port": 50052,
         "master_port": 8080,
         "auto_start_worker": False, # offer memory to the cluster on boot
+        "use_gpu": True,            # offer graphics memory as well as system
         "rpc_server": "",           # path to the rpc-server binary
         "llama_server": "",         # path to the llama-server binary
         "model_dir": "",            # where .gguf files live

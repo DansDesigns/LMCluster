@@ -97,6 +97,11 @@ code{font-family:var(--mono);font-size:.78rem;color:var(--amber);word-break:brea
 .machine.me{background:var(--panel);border-color:var(--amber-dim)}
 .machine.me .mname::after{content:' — this machine';color:var(--muted);
   font-size:.68rem}
+.switch{display:inline-flex;align-items:center;gap:.35rem;cursor:pointer;
+  font-family:var(--mono);font-size:.68rem;color:var(--muted);
+  text-transform:none;letter-spacing:0;margin:0}
+.switch input{width:auto;margin:0}
+.switch:hover{color:var(--text)}
 .contrib{font-family:var(--mono);font-size:.72rem;color:var(--teal)}
 .contrib.no{color:var(--muted);text-decoration:line-through}
 .sums{margin-top:.7rem;border-top:1px solid var(--line);padding-top:.6rem}
@@ -599,6 +604,30 @@ function advice(warnings, who){
 
 function loadingNow(d){ return d.model && d.model.state === 'loading'; }
 
+function gpuToggle(m){
+  /* Only offered where it can do something: the machine needs a build that
+     knows about its graphics device. Where it does not, the build tag
+     already says so and a dead switch would only puzzle people. */
+  if(!m.can_use_gpu) return '';
+  const on = m.use_gpu !== false;
+  return `<label class="switch" title="${on
+      ? 'Lending graphics memory as well as system memory'
+      : 'Lending system memory only'}">
+    <input type="checkbox" class="gputog" data-id="${esc(m.id || '')}"
+      data-self="${m.self ? '1' : ''}" ${on ? 'checked' : ''}>
+    <span>use GPU</span></label>`;
+}
+
+function buildTag(m){
+  /* Which llama.cpp build that machine has, read from the libraries next
+     to its binary rather than from anything it says at startup — so a
+     machine reinstalled with a GPU build says so straight away. */
+  const label = m.build_label || (m.can_shard === false ? '' : 'CPU build');
+  if(!label) return '';
+  const usingGpu = (m.build || []).length > 0;
+  return `<span class="link ${usingGpu ? 'good' : ''}">${esc(label)}</span>`;
+}
+
 function machineCard(m, contrib){
   /* One card per machine, this machine included and first. Keeping them in
      one list rather than two panels means the pool total can be read
@@ -619,9 +648,8 @@ function machineCard(m, contrib){
       <span class="tag ${cls.split(' ')[0]}">${esc(tag)}</span>
     </div>
     <div class="mmem">${gb(m.ram_free)} free of ${gb(m.ram_total)}
-      ${m.gpu && m.gpu !== 'none' ? '· ' + esc(m.gpu) : ''}
       ${m.vram_free ? '· ' + gb(m.vram_free) + ' vram' : ''}
-      ${linkTag(m.link)} ${share}</div>
+      ${linkTag(m.link)} ${buildTag(m)} ${share}</div>
     ${m.self && m.shard_problem
       ? `<div class="why">${esc(m.shard_problem)}</div>` : ''}
     ${!m.self && !m.in_pool
@@ -632,13 +660,18 @@ function machineCard(m, contrib){
            <button id="offer" data-act="${m.offering ? 'stop' : 'start'}"
              ${m.can_shard ? '' : 'disabled'}>${
              m.offering ? 'Leave the pool' : 'Join the pool'}</button>
+           ${gpuToggle(m)}
          </div>`
       : (m.remotely_fixable
          ? `<div class="row" style="margin-top:.55rem">
               <button class="fixbtn" data-id="${m.id}" data-name="${esc(m.name)}">
               ${m.reason === 'refused' ? 'Restart its worker'
                                        : 'Start its worker'}</button>
-            </div>` : '')}
+              ${gpuToggle(m)}
+            </div>`
+         : (gpuToggle(m)
+            ? `<div class="row" style="margin-top:.55rem">${gpuToggle(m)}</div>`
+            : ''))}
     ${advice(m.link && m.link.warnings, m.self ? 'This machine' : m.name)}
     ${m.gpu_warning ? advice([m.gpu_warning], m.self ? 'This machine' : m.name) : ''}
   </div>`;
@@ -741,6 +774,30 @@ async function refreshPool(){
         if(!r.ok){ const j = await r.json().catch(()=>({}));
           alert(`Could not start the worker on ${btn.dataset.name}:\n\n${j.detail || r.statusText}`); }
       }catch(e){ alert(e); }
+      setTimeout(refreshPool, 1400);
+    }));
+
+  document.getElementById('machines').querySelectorAll('.gputog')
+    .forEach(box => box.addEventListener('change', async () => {
+      const wanted = box.checked;
+      box.disabled = true;
+      const url = box.dataset.self
+        ? '/api/pool/gpu'
+        : `/api/pool/peers/${box.dataset.id}/gpu`;
+      try{
+        const r = await fetch(url, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({enabled: wanted})});
+        if(!r.ok){
+          const j = await r.json().catch(()=>({}));
+          alert(j.detail || r.statusText);
+          box.checked = !wanted;
+        }else{
+          const j = await r.json();
+          if(j.note) alert(j.note);
+        }
+      }catch(e){ alert(e); box.checked = !wanted; }
+      box.disabled = false;
       setTimeout(refreshPool, 1400);
     }));
 
@@ -1378,28 +1435,56 @@ async function loadLlama(){
   try{ d = await (await fetch('/api/llamacpp')).json(); }
   catch(e){ box.innerHTML = `<p class="empty">${esc(e)}</p>`; return; }
 
-  box.innerHTML = d.available
-    ? `<p class="hint">Build <code>${esc(d.version || 'unknown')}</code></p>
-       <div class="row"><button id="llupd">Update llama.cpp</button></div>
-       <div class="hint" id="llres"></div>`
-    : `<p class="hint">${esc(d.problem || 'not installed here')}</p>`;
+  if(!d.available){
+    box.innerHTML = `<p class="hint">${esc(d.problem || 'not installed here')}</p>`;
+    return;
+  }
 
-  const b = document.getElementById('llupd');
-  if(b) b.addEventListener('click', async () => {
-    if(!confirm('Fetch the current llama.cpp release?\n\nThis machine will '
-      + 'stop lending its memory for a moment while the files are replaced.')) return;
+  /* Offer a choice of build rather than only "update", because switching
+     between CPU and GPU is the reason most people come to this panel and
+     re-running the installer for it is a chore. */
+  const gpu = d.detected_gpu && d.detected_gpu !== 'none' ? d.detected_gpu : null;
+  const opts = ['<option value="cpu">CPU only</option>']
+    .concat(gpu ? [`<option value="${esc(gpu)}">${esc(gpu)}</option>`] : []);
+  const current = (d.build || []).length ? d.build[0] : 'cpu';
+
+  box.innerHTML = `
+    <p class="hint">Build <code>${esc(d.version || 'unknown')}</code> ·
+      <strong>${esc(d.build_label || 'CPU build')}</strong></p>
+    ${gpu && !(d.build || []).includes(gpu) && !d.gpu_integrated
+      ? `<p class="hint">This machine has a ${esc(d.gpu_name || gpu)}, which
+         this build cannot use. A graphics card holds far less than system
+         memory, so for a large model the CPU build is often the better
+         choice — switch only if you know the model fits.</p>` : ''}
+    <div class="row">
+      <select id="llbackend" style="flex:1;min-width:120px">${opts.join('')}</select>
+      <button id="llupd">Fetch</button>
+    </div>
+    <div class="hint" id="llres"></div>`;
+
+  const sel = document.getElementById('llbackend');
+  if(sel) sel.value = current;
+
+  document.getElementById('llupd').addEventListener('click', async e => {
+    const backend = document.getElementById('llbackend').value;
+    if(!confirm(`Fetch the current llama.cpp (${backend}) release?\n\n`
+      + 'This machine will stop lending its memory for a moment while the '
+      + 'files are replaced.')) return;
     const out = document.getElementById('llres');
-    b.disabled = true;
+    e.target.disabled = true;
     out.innerHTML = '<span class="spin"></span> downloading — a minute or two';
     try{
-      const r = await fetch('/api/llamacpp/update', {method:'POST'});
+      const r = await fetch('/api/llamacpp/update', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({backend})});
       const j = await r.json();
       out.innerHTML = r.ok
         ? `<span class="ok">${esc(j.message)}</span>`
+          + (j.warning ? `<br><span class="no">${esc(j.warning)}</span>` : '')
         : `<span class="no">${esc(j.detail || r.statusText)}</span>`;
       if(r.ok) setTimeout(loadLlama, 1500);
-    }catch(e){ out.innerHTML = `<span class="no">${esc(e)}</span>`; }
-    b.disabled = false;
+    }catch(err){ out.innerHTML = `<span class="no">${esc(err)}</span>`; }
+    e.target.disabled = false;
   });
 }
 

@@ -107,10 +107,12 @@ class Node:
         self.cfg = config
         self.rpc_worker = rpc.RpcWorker(
             binary=config.shard.get("rpc_server", ""),
-            port=int(config.shard.get("rpc_port", rpc.DEFAULT_RPC_PORT)))
+            port=int(config.shard.get("rpc_port", rpc.DEFAULT_RPC_PORT)),
+            use_gpu=bool(config.shard.get("use_gpu", True)))
         self.master = rpc.ShardMaster(
             binary=config.shard.get("llama_server", ""),
             port=int(config.shard.get("master_port", rpc.DEFAULT_MASTER_PORT)))
+        self.master.use_gpu = bool(config.shard.get("use_gpu", True))
         # The engine holds the same dict the settings page edits, so a
         # change takes effect on the next message rather than needing a
         # restart.
@@ -138,6 +140,11 @@ class Node:
         hw = hardware.probe(self.cfg.shard.get("model_dir") or None)
         link = hw.get("link") or {}
         worker = self.rpc_worker
+        # What the llama.cpp here was built for, read from the libraries
+        # beside it. Reported whether or not the worker is running, which
+        # matters: a machine that has just been reinstalled with a GPU
+        # build should say so immediately, not only once it starts lending.
+        backends = rpc.build_backends(self.cfg.shard.get("rpc_server", ""))
         return {
             "rpc": worker.running,
             "rpc_capable": self.can_shard(),
@@ -148,6 +155,11 @@ class Node:
             "devices": [{"id": d["id"], "name": d["name"], "free": d["free"]}
                         for d in worker.devices],
             "accelerators": len(worker.accelerators),
+            "build": [b for b in backends if b != "cpu"],
+            "build_label": rpc.describe_build(
+                self.cfg.shard.get("rpc_server", "")),
+            "use_gpu": bool(self.cfg.shard.get("use_gpu", True)),
+            "can_use_gpu": bool([b for b in backends if b != "cpu"]),
             "link": {"type": link.get("type"), "band": link.get("band"),
                      "speed_mbps": link.get("speed_mbps")},
             "ram_free": hw["ram_free"],
@@ -189,36 +201,44 @@ class Node:
 
 
 def gpu_mismatch(info: dict) -> dict | None:
-    """A graphics card present but invisible to llama.cpp.
+    """A graphics card present but not usable by the llama.cpp here.
 
-    The RPC server exposes whichever accelerators its binary was built for,
-    so a machine with a discrete card running a CPU-only build lends only
-    its system memory. Nothing appears broken — the card is simply missing
-    from the pool — and without saying so there is nothing to suggest why.
+    Answered from what the build contains rather than from what the RPC
+    server says at startup. The earlier version counted the devices named
+    in that startup text, which meant a machine that had just been
+    reinstalled with a GPU build kept reporting itself as CPU-only until
+    its worker was restarted — and if the wording of that output ever
+    differed from what was expected, it reported CPU-only for ever.
 
     Integrated graphics are deliberately not reported. They have no memory
     of their own, so adding one cannot increase how large a model the
-    cluster can hold, and telling somebody to go and reinstall for no gain
-    in capacity would be advice that wastes their afternoon.
+    cluster can hold, and sending somebody off to reinstall for no gain in
+    capacity would waste their afternoon.
     """
-    if not info.get("rpc") and not info.get("rpc_available"):
-        return None
     gpu = info.get("gpu") or info.get("gpu_backend")
     if not gpu or gpu == "none":
         return None
     if info.get("gpu_integrated"):
         return None
+    # The build knows how to use this kind of device, so nothing is wrong
+    # even if no worker is running to enumerate it yet.
+    if gpu in (info.get("build") or []):
+        return None
     if info.get("accelerators"):
         return None
+    if not info.get("rpc_capable", True) and not info.get("build"):
+        return None      # llama.cpp is not installed; a different problem
     name = info.get("gpu_name") or gpu
+    label = info.get("build_label") or "CPU build"
     return {
         "severity": "warn",
-        "message": f"has a graphics device ({name}) that llama.cpp cannot "
-                   f"see, so only its system memory is in the pool",
+        "message": f"has a graphics device ({name}) but a {label.lower()} "
+                   f"of llama.cpp, so only its system memory is in the pool",
         "fix": f"re-run the installer there with --gpu {gpu} if you want it "
-               f"used. Worth knowing first: a graphics card holds far less "
-               f"than system memory, so for a large model a CPU build can "
-               f"be the better choice on that machine.",
+               f"used, and restart that node afterwards. Worth knowing "
+               f"first: a graphics card holds far less than system memory, "
+               f"so for a large model a CPU build is often the better "
+               f"choice.",
     }
 
 
@@ -507,16 +527,26 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/llamacpp")
     async def llamacpp_info():
         """Which llama.cpp build this machine has."""
+        binary = config.shard.get("rpc_server", "")
+        hw = hardware.probe()
         return {
             "available": node.can_shard(),
             "problem": node.shard_problem(),
             "version": await asyncio.to_thread(node.master.version),
             "server": config.shard.get("llama_server", ""),
-            "rpc_server": config.shard.get("rpc_server", ""),
+            "rpc_server": binary,
+            "build": rpc.build_backends(binary),
+            "build_label": rpc.describe_build(binary),
+            "detected_gpu": hw.get("gpu_backend"),
+            "gpu_name": hw.get("gpu_name"),
+            "gpu_integrated": hw.get("gpu_integrated"),
         }
 
+    class LlamaUpdate(BaseModel):
+        backend: str | None = None      # None means detect
+
     @app.post("/api/llamacpp/update", dependencies=admin_guard)
-    async def llamacpp_update():
+    async def llamacpp_update(req: LlamaUpdate | None = None):
         """Fetch the current llama.cpp release, replacing what is here.
 
         Offered because a fair share of load failures are the model file
@@ -540,7 +570,8 @@ def create_app(config: Config) -> FastAPI:
         node.rpc_worker.stop()
 
         from . import prebuilt
-        backend = node.capabilities().get("gpu") or "cpu"
+        backend = (req.backend if req and req.backend
+                   else node.capabilities().get("gpu") or "cpu")
         if backend == "none":
             backend = "cpu"
         dest = os.path.dirname(os.path.dirname(
@@ -579,10 +610,19 @@ def create_app(config: Config) -> FastAPI:
             except rpc.RpcError as e:
                 lines.append(f"could not restart the worker: {e}")
 
+        got = rpc.build_backends(found["rpc"])
+        label = rpc.describe_build(found["rpc"])
+        warning = None
+        if backend not in ("cpu", "none") and backend not in got:
+            warning = (f"You asked for a {backend} build but what arrived is "
+                       f"a {label.lower()}. There may not be one published "
+                       f"for this platform.")
         return {"ok": True, "release": found["release"],
                 "asset": found["asset"], "log": lines,
+                "build_label": label, "warning": warning,
                 "version": await asyncio.to_thread(node.master.version),
-                "message": f"llama.cpp {found['release']} installed."}
+                "message": f"llama.cpp {found['release']} installed "
+                           f"({label})."}
 
     @app.get("/api/version/check")
     async def version_check():
@@ -645,8 +685,13 @@ def create_app(config: Config) -> FastAPI:
                 "ram_total": local.get("ram_total"),
                 "vram_free": local.get("vram_free"),
                 "gpu": local.get("gpu"),
+                "gpu_name": local.get("gpu_name"),
                 "devices": local.get("devices", []),
                 "accelerators": local.get("accelerators", 0),
+                "build": local.get("build", []),
+                "build_label": local.get("build_label"),
+                "use_gpu": local.get("use_gpu", True),
+                "can_use_gpu": local.get("can_use_gpu", False),
                 "gpu_warning": gpu_mismatch(local),
                 "link": {**(local.get("link") or {}),
                          "warnings": hardware.link_warnings(
@@ -659,6 +704,71 @@ def create_app(config: Config) -> FastAPI:
             "summary": rpc.pool_summary(local, peers),
             "model": await node.engine.info(),
         }
+
+    class GpuToggle(BaseModel):
+        enabled: bool
+
+    @app.post("/api/pool/gpu", dependencies=admin_guard)
+    async def set_gpu(req: GpuToggle):
+        """Choose whether this machine lends its graphics memory too.
+
+        Applied by restarting the worker, which is quick, rather than by
+        fetching a different build. The choice is genuinely not obvious:
+        graphics memory is faster but there is far less of it, so on a
+        model spread across several machines the same card can be the
+        reason it will not fit.
+        """
+        config.shard["use_gpu"] = bool(req.enabled)
+        node.rpc_worker.use_gpu = bool(req.enabled)
+        node.rpc_worker._flags = None
+        node.master.use_gpu = bool(req.enabled)
+        try:
+            config.save()
+        except OSError as e:
+            raise HTTPException(500, f"could not write {config.path}: {e}")
+
+        restarted = False
+        if node.rpc_worker.running:
+            node.rpc_worker.stop()
+            try:
+                node.rpc_worker.start()
+                restarted = True
+            except rpc.RpcError as e:
+                raise HTTPException(
+                    500, f"the setting was saved, but the worker would not "
+                         f"start again: {e}")
+
+        asyncio.create_task(refresh_peer_status(node))
+        return {"use_gpu": bool(req.enabled), "restarted": restarted,
+                "note": ("A model already loaded keeps whatever it was "
+                         "given; this applies to the next one."
+                         if node.master.running else None)}
+
+    @app.post("/api/pool/peers/{node_id}/gpu", dependencies=admin_guard)
+    async def set_peer_gpu(node_id: str, req: GpuToggle):
+        """Set another machine's graphics choice from here."""
+        peer = next((p for p in node.discovery.registry.online()
+                     if p["id"] == node_id), None)
+        if peer is None:
+            raise HTTPException(404, f"no machine on this cluster with id "
+                                     f"{node_id}")
+        url = f"http://{peer['ip']}:{peer['port']}/api/pool/gpu"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(url, json={"enabled": req.enabled},
+                                      headers=auth.client_headers(config))
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"could not reach {peer['name']}: {e}")
+        if r.status_code == 401:
+            raise HTTPException(
+                502, f"{peer['name']} rejected our cluster key, so it is on "
+                     f"a different cluster.")
+        if r.status_code >= 400:
+            detail = r.json().get("detail", r.text) if r.text else r.text
+            raise HTTPException(502, f"{peer['name']}: {detail}")
+        await asyncio.sleep(1.2)
+        asyncio.create_task(refresh_peer_status(node))
+        return {"node": peer["name"], **r.json()}
 
     @app.post("/api/pool/offer/{action}", dependencies=admin_guard)
     async def offer_memory(action: str):
