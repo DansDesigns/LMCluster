@@ -625,6 +625,33 @@ class ShardMaster:
         self.started_at = None
         return self.status()
 
+    # Lines llama.cpp prints while loading that actually say something
+    # about how far along it is.
+    _PROGRESS = ("load_tensors", "llama_model_loader", "print_info",
+                 "loading model", "offloading", "model buffer size",
+                 "init_tokenizer", "llama_context", "kv cache",
+                 "compute buffer", "graph nodes", "warming up")
+
+    def progress(self) -> str | None:
+        """The most recent line that says something about loading.
+
+        A large model spread over a network takes minutes to load, and a
+        counter of elapsed seconds tells you nothing about whether it is
+        working or wedged. llama.cpp is describing what it is doing the
+        whole time — naming each tensor buffer as it is filled — and the
+        last such line is a far better answer to "is this going anywhere".
+        """
+        for line in reversed(self.log[-80:]):
+            text = line.strip()
+            if not text or text.startswith("$"):
+                continue
+            if any(marker in text for marker in self._PROGRESS):
+                # Strip llama.cpp's timestamp and severity prefix, which
+                # take up half the width and say nothing.
+                cleaned = re.sub(r"^[\d.]+\s+[IWED]\s+\S*\s*", "", text)
+                return cleaned[:160]
+        return None
+
     def drain_log(self, limit: int = 200) -> list[str]:
         """Whatever llama.cpp has printed so far.
 
@@ -666,6 +693,7 @@ class ShardMaster:
             "uptime": (round(time.time() - self.started_at)
                        if self.started_at and self.running else None),
             "plan": self.plan,
+            "progress": self.progress(),
             "last_failure": self.last_failure,
             "url": f"http://127.0.0.1:{self.port}" if self.running else None,
         }
@@ -678,6 +706,11 @@ class ShardMaster:
 # remotely from the dashboard).
 PROBE_DIAGNOSIS = {
     "ok": ("Ready", "Accepting connections.", "", False),
+    "serving": (
+        "Holding the model",
+        "This machine is busy with part of the model that is loaded, which "
+        "is exactly what it is meant to be doing.",
+        "", False),
     "not_offered": (
         "Worker not started",
         "This machine has llama.cpp built and ready, but is not currently "
@@ -925,7 +958,10 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
 
     for w in workers:
         share = usable(w)
-        counted = w["reason"] == "ok"
+        # "serving" means the machine is carrying part of the model right
+        # now, which is as much a member of the pool as one merely standing
+        # ready — more so, in fact.
+        counted = w["reason"] in ("ok", "serving")
         if counted:
             live += share
             potential += share
@@ -940,7 +976,8 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
             "self": False,
             "bytes": share,
             "counted": counted,
-            "why": ("lending its memory" if counted
+            "why": (("holding part of the model" if w["reason"] == "serving"
+                     else "lending its memory") if counted
                     else f"not counted: {w.get('label', 'unavailable').lower()}"),
         })
 

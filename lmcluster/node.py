@@ -290,13 +290,32 @@ async def diagnose_peers(node: Node) -> list[dict]:
     if not peers:
         return []
 
+    # Machines that are carrying part of the model this node has loaded.
+    # They are demonstrably in the pool, whatever a probe might say.
+    enlisted = set()
+    plan = node.master.plan or {}
+    if node.master.running:
+        for w in plan.get("workers", []):
+            enlisted.add(w.get("host"))
+            if w.get("node_id"):
+                enlisted.add(w["node_id"])
+
     async def check(peer):
         port = peer.get("rpc_port") or rpc.DEFAULT_RPC_PORT
         link = dict(peer.get("link") or {})
         link["warnings"] = hardware.link_warnings(link)
         entry = {**peer, "rpc_port": port, "link": link}
 
-        if not peer.get("rpc_capable", True):
+        if peer["ip"] in enlisted or peer["id"] in enlisted:
+            # Do not probe a machine that is already working for us. The
+            # RPC server handles one connection at a time, so while it is
+            # receiving tensors it simply will not accept another — the
+            # probe times out and the machine gets reported as firewalled
+            # while its memory and graphics card are visibly busy. Being
+            # in the running plan is better evidence than any probe.
+            ok, reason = True, "serving"
+
+        elif not peer.get("rpc_capable", True):
             ok, reason = False, "no_rpc_build"
 
         elif not peer.get("rpc_available"):

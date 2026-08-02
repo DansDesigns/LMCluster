@@ -561,7 +561,9 @@ async function modelBar(){
     const m = await (await fetch('/api/model')).json();
     document.getElementById('modelbar').textContent =
       m.state === 'loading'
-        ? `loading ${m.model || 'a model'}${m.loading_for ? ` — ${m.loading_for}s` : ''}`
+        ? `loading ${m.model || 'a model'}${m.loading_for
+            ? ` — ${m.loading_for > 90 ? Math.round(m.loading_for / 60) + ' min'
+                                       : m.loading_for + 's'}` : ''}`
       : m.loaded
         ? `holding ${m.model} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
       : m.state === 'unreachable'
@@ -815,11 +817,19 @@ async function refreshPool(){
      and saying so saves somebody asking a question and getting a 503 they
      have to interpret. */
   if(d.model.state === 'loading'){
+    /* Show what llama.cpp is actually doing rather than only a stopwatch.
+       Several minutes is normal for a large model over a network, and the
+       question anyone has at that point is whether it is progressing or
+       stuck — which the last log line answers and a counter does not. */
+    const secs = d.model.loading_for;
     document.getElementById('verdict').innerHTML =
       `<div class="verdict solo"><span class="spin"></span>
-         Still loading${d.model.loading_for ? ` — ${d.model.loading_for}s so far` : ''}.
+         Loading${secs ? ` — ${secs > 90 ? Math.round(secs / 60) + ' min' : secs + 's'} so far` : ''}.
          A large model spread over several machines takes a while to read
-         in. It will answer once this finishes.</div>`;
+         in; several minutes is normal.</div>` +
+      (d.model.progress
+        ? `<pre class="log" style="max-height:none">${esc(d.model.progress)}</pre>`
+        : '');
   }
   const running = d.model.loaded || d.model.state === 'loading';
   document.getElementById('stop').style.display = running ? '' : 'none';

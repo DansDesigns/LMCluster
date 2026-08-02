@@ -149,6 +149,7 @@ class Engine:
             "loaded": state == "ready",
             "state": state,
             "loading_for": self.master.status().get("uptime"),
+            "progress": self.master.progress(),
             "model": model or os.path.basename(
                 plan.get("model_path", "").replace("\\", "/")),
             "nodes": len(plan.get("workers", [])) + 1,
