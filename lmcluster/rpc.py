@@ -84,16 +84,20 @@ class RpcWorker:
 
     def __init__(self, binary: str, port: int = DEFAULT_RPC_PORT,
                  host: str = "0.0.0.0", use_cache: bool = True,
-                 use_gpu: bool = True):
+                 use_gpu: bool = True, server_binary: str = ""):
         self.binary = binary
+        # llama-server, used only to ask what devices exist. The RPC server
+        # can list them too, but only by starting up and binding a port.
+        self.server_binary = server_binary
         self.port = int(port)
         self.host = host
         self.use_cache = use_cache
         # Whether to offer this machine's graphics memory as well as its
-        # system memory. Switchable at runtime rather than needing a
-        # different build, because the choice is not obvious: a graphics
-        # card is faster but holds far less, so on a large model spread
-        # across machines the same card can be the reason it will not fit.
+        # system memory. Switchable while running rather than needing a
+        # different build, because the right answer is not obvious: a
+        # graphics card is faster but holds far less, so on a large model
+        # spread across machines the same card can be the reason it will
+        # not fit.
         self.use_gpu = use_gpu
         self.proc: subprocess.Popen | None = None
         self.started_at: float | None = None
@@ -102,6 +106,7 @@ class RpcWorker:
         self.banner: list[str] = []
         self.devices: list[dict] = []
         self._flags: set | None = None
+        self._devices_cache = None
 
     @property
     def running(self) -> bool:
@@ -128,6 +133,16 @@ class RpcWorker:
             pass
         self._flags = flags
         return flags
+
+    def available_devices(self) -> list[dict]:
+        """Devices this machine could offer, cached for a short while."""
+        now = time.time()
+        cached = getattr(self, "_devices_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        found = list_devices(self.server_binary or self.binary)
+        self._devices_cache = (now, found)
+        return found
 
     def build_command(self) -> list[str]:
         flags = self._supported_flags()
@@ -746,6 +761,57 @@ def build_backends(binary: str) -> list[str]:
            for n in names):
         found.append("cpu")
     return found
+
+
+# Which device identifier belongs to which backend. llama.cpp names them
+# by backend and index — CUDA0, Vulkan0, ROCm0 — with the plain CPU always
+# called CPU.
+_DEVICE_PREFIX = {"cuda": "CUDA", "vulkan": "Vulkan", "rocm": "ROCm",
+                  "metal": "Metal", "sycl": "SYCL", "opencl": "OpenCL"}
+
+
+def list_devices(binary: str, timeout: int = 20) -> list[dict]:
+    """Every device this build can see, without starting a server.
+
+    llama.cpp will list them on request, which is better than starting the
+    RPC server and reading what it prints: that binds a port, and it has to
+    be stopped again afterwards.
+
+    Output looks like:
+
+        Available devices:
+          Vulkan0: AMD Radeon 680M (12288 MiB, 11900 MiB free)
+          CPU: AMD Ryzen 7 (32768 MiB, 24110 MiB free)
+    """
+    if not binary or not os.path.exists(binary):
+        return []
+    try:
+        r = subprocess.run([binary, "--list-devices"], capture_output=True,
+                           text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    text = (r.stdout or "") + (r.stderr or "")
+    devices = []
+    for line in text.splitlines():
+        m = re.match(r"\s*(\w+):\s*(.+?)\s*\((\d+)\s*MiB,\s*(\d+)\s*MiB free\)",
+                     line)
+        if not m:
+            continue
+        ident = m.group(1)
+        # The listing is preceded by other lines that can look similar;
+        # only accept identifiers that name a backend we know.
+        if ident.upper() != "CPU" and not any(
+                ident.startswith(p) for p in _DEVICE_PREFIX.values()):
+            continue
+        devices.append({
+            "id": ident,
+            "name": m.group(2),
+            "total": int(m.group(3)) * 1024 * 1024,
+            "free": int(m.group(4)) * 1024 * 1024,
+            "accelerator": ident.upper() != "CPU",
+        })
+    return devices
 
 
 def describe_build(binary: str) -> str:
