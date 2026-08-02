@@ -75,6 +75,39 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _toml_string(value: str) -> str:
+    """Quote a string the way TOML requires.
+
+    Backslashes have to be escaped, and forgetting that is not a cosmetic
+    problem: a Windows path written as "C:\\Users\\Dan" is read back with
+    \\U starting a Unicode escape, and the file stops parsing entirely. The
+    node then will not start at all, with a message about an illegal
+    character that says nothing about which setting caused it.
+
+    That is exactly what happened here. This emitter escaped quotes and
+    nothing else, so the first time somebody saved a setting on a Windows
+    machine with a model folder configured, it wrote a config that could
+    never be read again.
+    """
+    out = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def _toml_dump(data: dict, indent: str = "") -> str:
     """Minimal TOML emitter for our flat config shape (str/int/float/bool
     values, nested dict tables). Avoids an extra dependency."""
@@ -87,7 +120,7 @@ def _toml_dump(data: dict, indent: str = "") -> str:
             return "true" if value else "false"
         if isinstance(value, (int, float)):
             return str(value)
-        return '"' + str(value).replace('"', '\\"') + '"'
+        return _toml_string(str(value))
 
     for k, v in scalars.items():
         lines.append(f"{k} = {emit(v)}")
@@ -112,8 +145,30 @@ class Config:
         self.path = path
         raw = {}
         if os.path.exists(path):
-            with open(path, "rb") as f:
-                raw = tomllib.load(f)
+            try:
+                with open(path, "rb") as f:
+                    raw = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                # A config that cannot be read used to stop the node dead
+                # with a stack trace naming a character position, which
+                # tells you nothing about which setting is at fault and
+                # leaves the machine out of the cluster entirely. Better to
+                # set the bad file aside, say so clearly, and come up on
+                # defaults — the machine rejoins, and the dashboard can be
+                # used to put the settings back.
+                broken = path + ".broken"
+                try:
+                    if os.path.exists(broken):
+                        os.remove(broken)
+                    os.rename(path, broken)
+                    moved = f" It has been renamed to {os.path.basename(broken)}."
+                except OSError:
+                    moved = ""
+                print(f"[config] {path} could not be read: {e}{moved}\n"
+                      f"[config] starting with default settings. Set the "
+                      f"model folder and anything else again under Settings, "
+                      f"or re-run the installer.", file=sys.stderr)
+                raw = {}
         else:
             print(f"[config] no {path} found, using defaults", file=sys.stderr)
         self.data = _deep_merge(DEFAULTS, raw)

@@ -819,6 +819,33 @@ def _existing_tables(text: str) -> set:
                                            re.M)}
 
 
+def _trailing_comment(line: str) -> str:
+    """The comment at the end of a config line, if there really is one.
+
+    Finding the first hash and calling the rest a comment is wrong, because
+    a hash inside a quoted value is just a character — Windows paths and
+    llama.cpp argument strings can both contain one. Doing that turned
+
+        extra_args = "--file C:\\models\\tmpl#1.jinja"
+
+    into a mangled line with a stray quote in it. So this walks the line
+    and only treats a hash as a comment when it is outside quotes.
+    """
+    in_quotes = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+        elif ch == "#" and not in_quotes:
+            return "  " + line[i:].rstrip()
+    return ""
+
+
 def _set_key(text: str, table: str, key: str, value: str) -> tuple[str, bool]:
     """Rewrite `key = ...` inside `[table]`, leaving the rest byte-identical.
 
@@ -834,10 +861,7 @@ def _set_key(text: str, table: str, key: str, value: str) -> tuple[str, bool]:
             in_table = header.group(1) == table
             continue
         if in_table and re.match(rf"^\s*{re.escape(key)}\s*=", line):
-            comment = ""
-            if "#" in line:
-                comment = "  " + line[line.index("#"):].rstrip()
-            lines[i] = f"{key} = {value}{comment}\n"
+            lines[i] = f"{key} = {value}{_trailing_comment(line)}\n"
             return "".join(lines), True
     return text, False
 
