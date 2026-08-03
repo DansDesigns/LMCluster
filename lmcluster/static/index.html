@@ -76,6 +76,8 @@ code{font-family:var(--mono);font-size:.78rem;color:var(--amber);word-break:brea
 /* pool */
 .pooltotal{font-family:var(--mono);font-size:1.6rem;color:var(--teal);line-height:1.15}
 .pooltotal small{display:block;font-size:.7rem;color:var(--muted);margin-top:.2rem}
+.freeused{font-size:.8rem;color:var(--muted);margin-left:.6rem;
+  white-space:nowrap}
 .poolbar{height:24px;border:1px solid var(--line);border-radius:4px;display:flex;
   overflow:hidden;background:var(--ink);margin:.7rem 0 .35rem}
 .seg{display:flex;align-items:center;justify-content:center;font-family:var(--mono);
@@ -576,13 +578,16 @@ async function modelBar(){
   }catch(e){}
   try{
     const m = await (await fetch('/api/model')).json();
+    const at = m.is_local === false && m.held_by ? ` on ${m.held_by}` : '';
+    const pct = m.progress_fraction != null
+      ? ` ${Math.round(m.progress_fraction * 100)}%` : '';
     document.getElementById('modelbar').textContent =
       m.state === 'loading'
-        ? `loading ${m.model || 'a model'}${m.loading_for
+        ? `loading ${m.model || 'a model'}${at}${pct}${m.loading_for
             ? ` — ${m.loading_for > 90 ? Math.round(m.loading_for / 60) + ' min'
                                        : m.loading_for + 's'}` : ''}`
       : m.loaded
-        ? `holding ${m.model} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
+        ? `holding ${m.model}${at} across ${m.nodes} machine${m.nodes === 1 ? '' : 's'}`
       : m.state === 'unreachable'
         ? 'llama.cpp is not answering'
         : 'no model loaded';
@@ -703,16 +708,19 @@ async function refreshPool(){
     '<p class="empty">cannot reach this machine</p>'; return; }
   const s = d.summary, L = d.local;
 
+  /* The headline is the size of the pool, with free and used beside it.
+     Leading with free space meant the number moved whenever a model was
+     loaded or unloaded, which made it hard to tell at a glance how big the
+     cluster actually is — the thing you want when deciding whether a model
+     will fit. */
   const mb = (d.model.model_size && d.model.state !== 'none')
     ? Math.min(d.model.model_size, s.live_bytes) : 0;
-  document.getElementById('pool-total').innerHTML = mb
-    ? `${gb(s.live_bytes - mb)} free<small>of ${gb(s.live_bytes)} across ` +
-      `${s.node_count} machine${s.node_count === 1 ? '' : 's'} · ` +
-      `${gb(mb)} held by ${esc(d.model.model || 'the model')}</small>`
-    : `${gb(s.live_bytes)}<small>usable from this machine, across ` +
-      `${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
-      (s.potential_bytes > s.live_bytes
-        ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
+  document.getElementById('pool-total').innerHTML =
+    `${gb(s.live_bytes)}<span class="freeused">` +
+    `${gb(s.live_bytes - mb)} free / ${gb(mb)} used</span>` +
+    `<small>pooled across ${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
+    (s.potential_bytes > s.live_bytes
+      ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
 
   document.getElementById('pool-legend').innerHTML =
     (mb ? `<span><i style="background:var(--amber)"></i>${
@@ -833,6 +841,14 @@ async function refreshPool(){
   /* A model that is still reading itself in is neither absent nor usable,
      and saying so saves somebody asking a question and getting a 503 they
      have to interpret. */
+  if(d.model.state === 'ready' && d.model.is_local === false){
+    document.getElementById('verdict').innerHTML =
+      `<div class="verdict yes">${esc(d.model.model || 'A model')} is loaded
+         on ${esc(d.model.held_by)}, across ${d.model.nodes || '?'}
+         machine${d.model.nodes === 1 ? '' : 's'}. Ask it questions from
+         that machine's dashboard.</div>`;
+  }
+
   if(d.model.state === 'loading'){
     /* Show what llama.cpp is actually doing rather than only a stopwatch.
        Several minutes is normal for a large model over a network, and the
@@ -864,17 +880,29 @@ async function refreshPool(){
                · no progress figure yet</p>`;
     }
 
+    const where = d.model.is_local === false && d.model.held_by
+      ? ` on ${esc(d.model.held_by)}` : '';
     document.getElementById('verdict').innerHTML =
-      `<div class="verdict solo">Loading. A large model spread over several
-         machines takes a while to read in; several minutes is normal.
-         ${bar}</div>` +
+      `<div class="verdict solo">Loading${where}${
+         d.model.model ? ` — ${esc(d.model.model)}` : ''}. A large model
+         spread over several machines takes a while to read in; several
+         minutes is normal.${bar}</div>` +
       (d.model.progress
         ? `<pre class="log" style="max-height:none">${esc(d.model.progress)}</pre>`
         : '');
   }
   const running = d.model.loaded || d.model.state === 'loading';
-  document.getElementById('stop').style.display = running ? '' : 'none';
+  const mine = d.model.is_local !== false;
+  /* Unload and Load only mean anything on the machine actually running
+     llama.cpp. Showing them elsewhere would offer a button that cannot do
+     what it says. */
+  document.getElementById('stop').style.display = (running && mine) ? '' : 'none';
   document.getElementById('go').style.display = running ? 'none' : '';
+  if(running && !mine){
+    document.getElementById('model-dir').textContent =
+      `Held by ${d.model.held_by}. Load and unload from that machine's own `
+      + `dashboard.`;
+  }
 
   /* A model can fail well after loading appeared to start — a large one
      takes minutes to read off disk and can run out of room near the end.

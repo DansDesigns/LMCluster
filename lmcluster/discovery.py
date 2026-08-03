@@ -43,6 +43,7 @@ class PeerRegistry:
                 "rpc_available": bool(caps.get("rpc")),
                 "rpc_capable": bool(caps.get("rpc_capable")),
                 "accelerators": caps.get("accelerators", 0),
+                "model": caps.get("model"),
                 "build": caps.get("build", []),
                 "build_label": caps.get("build_label"),
                 "use_gpu": caps.get("use_gpu", True),

@@ -151,6 +151,12 @@ class Node:
             "rpc_capable": self.can_shard(),
             "rpc_port": worker.port,
             "holding_model": self.master.running,
+            # What this machine is doing with a model, broadcast so every
+            # dashboard on the cluster shows the same thing. Without it,
+            # only the machine that started a load could see it happening,
+            # and everyone else saw an idle cluster while their memory was
+            # visibly being used.
+            "model": self.model_beacon(),
             # What llama.cpp is actually able to use here, which is not the
             # same as what the machine physically contains.
             "devices": [{"id": d["id"], "name": d["name"], "free": d["free"]}
@@ -176,6 +182,29 @@ class Node:
             "gpu_name": hw["gpu_name"],
             "gpu_integrated": hw.get("gpu_integrated", False),
             "cpu_count": hw["cpu_count"],
+        }
+
+    def model_beacon(self) -> dict | None:
+        """A compact description of the model this machine holds.
+
+        Deliberately small: this rides in a UDP datagram every few seconds,
+        so it carries a name, a state, a percentage and a size, and nothing
+        else. Anything richer is fetched from the machine itself when
+        somebody actually looks.
+        """
+        if not self.master.running:
+            return None
+        plan = self.master.plan or {}
+        frac = self.master.progress_fraction()
+        name = os.path.basename(
+            (plan.get("model_path") or "").replace("\\", "/")) or None
+        return {
+            "name": name,
+            "size": plan.get("model_size"),
+            "nodes": len(plan.get("workers", [])) + 1,
+            "pct": None if frac is None else round(frac * 100),
+            "since": (round(time.time() - self.master.started_at)
+                      if self.master.started_at else None),
         }
 
     def can_shard(self) -> bool:
@@ -247,6 +276,51 @@ def gpu_mismatch(info: dict) -> dict | None:
                f"so for a large model a CPU build is often the better "
                f"choice.",
     }
+
+
+async def cluster_model(node: Node, peers: list[dict]) -> dict:
+    """What the cluster is holding, wherever it is being held.
+
+    A model is loaded by one machine and carried by several, but every
+    machine's dashboard should show the same thing. Reporting only what
+    this machine started meant that watching from anywhere else showed an
+    idle cluster while its memory was visibly in use — and if you happened
+    to be looking at the wrong dashboard, a load in progress was invisible.
+
+    The local view wins when there is one, because it is direct and
+    current. Otherwise the most recent peer announcement is used, and the
+    reply says which machine it came from so the page can be honest about
+    watching from a distance.
+    """
+    info = await node.engine.info()
+    if info.get("state") != "none":
+        return {**info, "held_by": node.cfg.name, "is_local": True}
+
+    for peer in peers:
+        beacon = peer.get("model")
+        if not beacon:
+            continue
+        pct = beacon.get("pct")
+        # A peer's announcement cannot tell us whether llama.cpp has
+        # finished reading the model in — only that machine can ask its own
+        # server. A percentage below 100 is a good enough signal, and being
+        # briefly wrong here costs nothing but a label.
+        state = "ready" if pct is not None and pct >= 100 else "loading"
+        return {
+            "loaded": state == "ready",
+            "state": state,
+            "model": beacon.get("name"),
+            "model_size": beacon.get("size"),
+            "nodes": beacon.get("nodes"),
+            "workers": [],
+            "loading_for": beacon.get("since"),
+            "progress_fraction": None if pct is None else pct / 100.0,
+            "progress": None,
+            "held_by": peer.get("name"),
+            "is_local": False,
+        }
+
+    return {**info, "held_by": None, "is_local": True}
 
 
 async def peer_status(node: Node, force: bool = False) -> list[dict]:
@@ -733,7 +807,7 @@ def create_app(config: Config) -> FastAPI:
             },
             "peers": peers,
             "summary": rpc.pool_summary(local, peers),
-            "model": await node.engine.info(),
+            "model": await cluster_model(node, peers),
         }
 
     class GpuToggle(BaseModel):
@@ -965,7 +1039,8 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/model")
     async def model_info():
-        return await node.engine.info()
+        """What the cluster is holding, from this machine's point of view."""
+        return await cluster_model(node, await peer_status(node))
 
     @app.post("/api/chat", dependencies=admin_guard)
     async def chat(req: ChatRequest):
