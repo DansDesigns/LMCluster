@@ -713,61 +713,44 @@ async function refreshPool(){
      loaded or unloaded, which made it hard to tell at a glance how big the
      cluster actually is — the thing you want when deciding whether a model
      will fit. */
-  const mb = (d.model.model_size && d.model.state !== 'none')
-    ? Math.min(d.model.model_size, s.live_bytes) : 0;
-  document.getElementById('pool-total').innerHTML =
-    `${gb(s.live_bytes)}<span class="freeused">` +
-    `${gb(s.live_bytes - mb)} free / ${gb(mb)} used</span>` +
-    `<small>pooled across ${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
-    (s.potential_bytes > s.live_bytes
-      ? ` · ${gb(s.potential_bytes)} if the rest joined` : '') + `</small>`;
-
-  document.getElementById('pool-legend').innerHTML =
-    (mb ? `<span><i style="background:var(--amber)"></i>${
-       loadingNow(d) ? 'loading' : 'model'}</span>` : '') +
-    `<span><i style="background:var(--teal)"></i>free</span>` +
-    (s.potential_bytes > s.live_bytes
-      ? `<span><i style="background:var(--amber-dim)"></i>available</span>` : '');
-
-  /* Three parts to the bar: what the loaded model is taking up, what is
-     left of the pool, and what more there would be if the remaining
-     machines joined. Seeing the model against the pool is the quickest way
-     to judge whether a bigger one would fit. */
-  const max = Math.max(s.potential_bytes, 1);
-  const modelBytes = (d.model.model_size && d.model.state !== 'none')
-    ? Math.min(d.model.model_size, s.live_bytes) : 0;
-  const freeBytes = Math.max(0, s.live_bytes - modelBytes);
+  /* Two figures, and the distinction matters.
+     Capacity is every machine's memory less what each holds back. It moves
+     only when a machine joins or leaves, so it is a fact about the cluster
+     and the right thing to judge whether a model will fit.
+     Free memory falls as a model is read in, which is why it makes a poor
+     headline: the number drained away while people watched and left them
+     wondering where their memory had gone. */
+  const cap = s.capacity_bytes || s.live_bytes;
+  const inUse = Math.max(0, cap - s.live_bytes);
   const spareBytes = Math.max(0, s.potential_bytes - s.live_bytes);
-  const pct = v => v / max * 100;
+  const max = Math.max(cap, 1);
   const loading = d.model.state === 'loading';
 
-  document.getElementById('pool-bar').innerHTML =
-    (modelBytes > 0
-      ? `<div class="seg ${loading ? 'loading' : 'model'}"
-             style="width:${pct(modelBytes)}%"
-             title="${esc(d.model.model || 'model')} — ${gb(modelBytes)}">${
-           pct(modelBytes) > 18 ? gb(modelBytes) : ''}</div>` : '') +
-    (freeBytes > 0
-      ? `<div class="seg live" style="width:${pct(freeBytes)}%"
-             title="free in the pool">${
-           pct(freeBytes) > 18 ? gb(freeBytes) : ''}</div>` : '') +
-    (spareBytes > 0
-      ? `<div class="seg spare" style="width:${pct(spareBytes)}%"
-             title="available if the other machines joined">${
-           pct(spareBytes) > 18 ? '+' + gb(spareBytes) : ''}</div>` : '');
+  document.getElementById('pool-total').innerHTML =
+    `${gb(cap)}<span class="freeused">` +
+    `${gb(s.live_bytes)} free / ${gb(inUse)} in use</span>` +
+    `<small>pooled across ${s.node_count} machine${s.node_count === 1 ? '' : 's'}` +
+    (spareBytes > 0 ? ` · ${gb(spareBytes)} more available` : '') +
+    `</small>`;
 
-  /* The arithmetic, written out. Two machines will often disagree about
-     the total, and showing which machines went into it turns that from a
-     worry into something you can read. */
-  document.getElementById('pool-breakdown').innerHTML =
-    `<div class="sums">` + (s.breakdown || []).map(x =>
-      `<div class="sumrow ${x.counted ? 'in' : ''}">
-         <span>${x.counted ? '' : '— '}${esc(x.name)}
-           <span class="sub">${esc(x.why)}</span></span>
-         <span>${x.counted ? gb(x.bytes) : '—'}</span>
-       </div>`).join('') +
-    `<div class="sumrow total"><span>usable from here</span>
-       <span>${gb(s.live_bytes)}</span></div></div>`;
+  document.getElementById('pool-legend').innerHTML =
+    (inUse > 0 ? `<span><i style="background:var(--amber)"></i>${
+       loading ? 'loading' : 'in use'}</span>` : '') +
+    `<span><i style="background:var(--teal)"></i>free</span>`;
+
+  /* The bar fills a fixed width rather than being drawn against a scale
+     that moves under it. */
+  const pct = v => v / max * 100;
+  document.getElementById('pool-bar').innerHTML =
+    (inUse > 0
+      ? `<div class="seg ${loading ? 'loading' : 'model'}"
+             style="width:${pct(inUse)}%"
+             title="${esc(d.model.model || 'in use')} — ${gb(inUse)}">${
+           pct(inUse) > 18 ? gb(inUse) : ''}</div>` : '') +
+    (s.live_bytes > 0
+      ? `<div class="seg live" style="width:${pct(s.live_bytes)}%"
+             title="free across the cluster">${
+           pct(s.live_bytes) > 18 ? gb(s.live_bytes) : ''}</div>` : '');
 
   const notes = [];
   if(s.fixable) notes.push(`${s.fixable} machine${s.fixable === 1 ? '' : 's'} could join with one click.`);

@@ -128,6 +128,13 @@ class Node:
         # it runs on its own schedule and the page reads the last result.
         self.peer_status: list[dict] = []
         self.peer_status_at: float = 0.0
+        # This machine's own view of whether its model is usable yet, kept
+        # current by a background task and broadcast to the others. Letting
+        # each machine answer for itself is the only reliable way: a peer
+        # cannot tell from a percentage whether llama.cpp has finished, and
+        # inferring it from one meant a machine whose build prints no
+        # progress showed "loading" for ever.
+        self.model_state: str = "none"
         self._probe_lock = asyncio.Lock()
 
     def capabilities(self) -> dict:
@@ -199,6 +206,7 @@ class Node:
         name = os.path.basename(
             (plan.get("model_path") or "").replace("\\", "/")) or None
         return {
+            "state": self.model_state,
             "name": name,
             "size": plan.get("model_size"),
             "nodes": len(plan.get("workers", [])) + 1,
@@ -301,11 +309,14 @@ async def cluster_model(node: Node, peers: list[dict]) -> dict:
         if not beacon:
             continue
         pct = beacon.get("pct")
-        # A peer's announcement cannot tell us whether llama.cpp has
-        # finished reading the model in — only that machine can ask its own
-        # server. A percentage below 100 is a good enough signal, and being
-        # briefly wrong here costs nothing but a label.
-        state = "ready" if pct is not None and pct >= 100 else "loading"
+        # The machine holding the model says whether it is ready, because
+        # only it can ask its own llama.cpp. Older announcements carry no
+        # state, so fall back to the percentage for those.
+        state = beacon.get("state")
+        if state not in ("loading", "ready", "unreachable"):
+            state = "ready" if pct is not None and pct >= 100 else "loading"
+        if state == "none":
+            continue
         return {
             "loaded": state == "ready",
             "state": state,
@@ -352,6 +363,21 @@ async def peer_status_loop(node: Node, interval: float = 6.0):
             await refresh_peer_status(node)
         except Exception as e:
             print(f"[pool] could not check the other machines: {e}")
+        await asyncio.sleep(interval)
+
+
+async def model_state_loop(node: Node, interval: float = 3.0):
+    """Keep this machine's own view of its model current.
+
+    Asked here rather than when somebody looks, because the answer is
+    broadcast to every other machine several times a minute and running an
+    HTTP request inside the beacon thread would be a poor arrangement.
+    """
+    while True:
+        try:
+            node.model_state = await node.engine.state()
+        except Exception:
+            node.model_state = "unreachable"
         await asyncio.sleep(interval)
 
 
@@ -464,6 +490,7 @@ def create_app(config: Config) -> FastAPI:
         skills.ensure_builtins()
         node.discovery.start()
         asyncio.create_task(peer_status_loop(node))
+        asyncio.create_task(model_state_loop(node))
         if node.can_shard() and config.shard.get("auto_start_worker"):
             try:
                 node.rpc_worker.start()

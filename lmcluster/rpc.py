@@ -39,6 +39,25 @@ DEFAULT_MASTER_PORT = 8080
 DEFAULT_RESERVE_BYTES = 2 * 1024 ** 3
 
 
+def capacity_memory(node: dict) -> int:
+    """How much memory a machine brings to the cluster, in total.
+
+    Its whole memory, less whatever it holds back — not its free memory.
+    Deliberately not the free figure, because that falls as a model loads
+    into it, which made the headline number shrink while a model was being
+    read in and left people wondering where their memory had gone. This
+    only moves when a machine joins or leaves, or changes its reserve.
+    """
+    ram = node.get("ram_total") or 0
+    vram = node.get("vram_total") or node.get("vram_free") or 0
+    if node.get("gpu_backend") == "metal" or node.get("gpu") == "metal":
+        vram = 0
+    reserve = node.get("reserve")
+    if reserve is None:
+        reserve = DEFAULT_RESERVE_BYTES
+    return max(0, ram + vram - int(reserve))
+
+
 def usable_memory(node: dict) -> int:
     """How much of a machine's memory the cluster may actually plan on.
 
@@ -989,6 +1008,7 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
     """
     usable = usable_memory
     live = usable(local)
+    capacity = capacity_memory(local)
     potential = live
     ready, fixable, blocked = [], [], []
     breakdown = [{
@@ -1009,6 +1029,7 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
         counted = w["reason"] in ("ok", "serving")
         if counted:
             live += share
+            capacity += capacity_memory(w)
             potential += share
             ready.append(w)
         elif w.get("remotely_fixable"):
@@ -1029,6 +1050,11 @@ def pool_summary(local: dict, workers: list[dict]) -> dict:
         })
 
     return {
+        # What the cluster amounts to: steady, and the figure to judge
+        # whether a model will fit at all.
+        "capacity_bytes": capacity,
+        # What is unspoken for at this instant, which is what the planner
+        # works from and which naturally falls as a model is read in.
         "live_bytes": live,
         "potential_bytes": potential,
         "node_count": 1 + len(ready),
